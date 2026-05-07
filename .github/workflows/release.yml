@@ -1,0 +1,36 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build EXEs
+        run: cargo build --release -p catstage -p catc
+      - name: Stage artifacts
+        run: |
+          mkdir dist
+          copy target\release\catstage.exe dist\
+          copy target\release\catc.exe     dist\
+        shell: cmd
+      - uses: actions/upload-artifact@v4
+        with:
+          name: catcast-windows-x64
+          path: dist/
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/catstage.exe
+            dist/catc.exe
+          generate_release_notes: true

@@ -36,6 +36,18 @@ If in doubt, open an issue first.
 
 CatCast is a Rust workspace; `cargo build --workspace` from the repo root
 should be the only thing you need. Tests run with `cargo test --workspace`.
+
+**Linux / WSL is the recommended dev path** even though v1 ships
+Windows-only binaries. Inner-loop on Linux for fast iteration, then push a
+tag — GitHub Actions builds and publishes `catstage.exe` and `catc.exe` from
+`windows-latest` (see `.github/workflows/release.yml`). CI also runs on
+`ubuntu-latest` and `windows-latest` in parallel so you'll catch
+platform-specific breakage before it lands.
+
+When `catstage` gains its Tauri/WebView2 shell, Linux dev will additionally
+need the WebKitGTK toolchain (`libwebkit2gtk-4.1-dev`, `libsoup-3.0-dev`,
+and friends). Until then, plain `cargo` is enough.
+
 The CF Worker (`crates/catsocks`) needs `wrangler` for deploy and
 `worker-build` for compilation; both are dev-only.
 
