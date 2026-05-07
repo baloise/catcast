@@ -1,0 +1,23 @@
+[package]
+name = "catcast-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wire protocol: AEAD envelope, KDF, command types"
+
+[dependencies]
+catcast-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+
+chacha20poly1305 = { workspace = true }
+argon2 = { workspace = true }
+rand = { workspace = true }
+base64 = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+serde_yaml = { workspace = true }

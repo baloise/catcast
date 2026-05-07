@@ -1,0 +1,19 @@
+/target
+**/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Tauri
+crates/catstage/target
+crates/catstage/dist
+
+# Cloudflare worker build artifacts
+crates/catsocks/build
+crates/catsocks/.wrangler
+crates/catsocks/node_modules
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp

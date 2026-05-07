@@ -1,0 +1,28 @@
+[package]
+name = "catstage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CatCast fullscreen viewer"
+
+[[bin]]
+name = "catstage"
+path = "src/main.rs"
+
+[dependencies]
+catcast-core = { workspace = true }
+catcast-proto = { workspace = true }
+
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+directories = { workspace = true }
+chrono = { workspace = true }
+
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }

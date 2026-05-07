@@ -1,0 +1,2 @@
+coffee: "nav https://example.com/coffee.html --for 5m"
+standup: "nav https://intranet.example.com/standup --for 30m"

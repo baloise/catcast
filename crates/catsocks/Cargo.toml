@@ -1,0 +1,15 @@
+[package]
+name = "catsocks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CatCast WebSocket relay — Cloudflare Worker (Rust/WASM)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The `worker` crate dependency and the Durable Object implementation will
+# land alongside the wrangler config. Until then this crate is a placeholder
+# so the workspace builds cleanly.

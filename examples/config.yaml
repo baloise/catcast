@@ -1,0 +1,19 @@
+version: 1
+
+rotation:
+  default_duration: 30s
+  urls:
+    # Short form — uses the default duration above.
+    - https://intranet.example.com/dashboard
+    # Long form — overrides the duration for just this entry.
+    - url: https://intranet.example.com/news
+      duration: 60s
+
+# Fixed-time entries override the rotation while they are active. The cron
+# expression is standard 5-field: `min hour day-of-month month day-of-week`.
+# Optional 6-field (with leading second) and 7-field (with trailing year) are
+# also accepted.
+fixed:
+  - cron: "0 9 * * MON-FRI"
+    url: https://intranet.example.com/standup
+    duration: 30m
