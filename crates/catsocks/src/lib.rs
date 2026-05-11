@@ -54,11 +54,13 @@ mod worker_impl {
 
         async fn fetch(&mut self, _req: Request) -> Result<Response> {
             let pair = WebSocketPair::new()?;
-            // Tag each socket with a unique id so we can later identify the
-            // sender and skip it during broadcast.
-            let tag = Uuid::new_v4().to_string();
-            self.state
-                .accept_web_socket_with_tags(&pair.server, vec![tag]);
+            // Stamp each socket with a unique id via serialize_attachment.
+            // We read it back inside websocket_message to skip the sender
+            // when broadcasting, so the CLI doesn't see its own messages
+            // echo back. The attachment survives hibernation.
+            let id = Uuid::new_v4().to_string();
+            pair.server.serialize_attachment(&id)?;
+            self.state.accept_web_socket(&pair.server);
             Response::from_websocket(pair.client)
         }
 
@@ -72,11 +74,10 @@ mod worker_impl {
                 // The protocol is text-only; binary frames are ignored.
                 WebSocketIncomingMessage::Binary(_) => return Ok(()),
             };
-            let sender_tags = self.state.get_tags(&ws);
-            let sender_id = sender_tags.first();
+            let sender_id: Option<String> = ws.deserialize_attachment().ok().flatten();
             for other in self.state.get_websockets() {
-                let other_tags = self.state.get_tags(&other);
-                if other_tags.first() == sender_id {
+                let other_id: Option<String> = other.deserialize_attachment().ok().flatten();
+                if other_id == sender_id {
                     continue;
                 }
                 // Best effort — a dead socket here shouldn't tank the relay.
