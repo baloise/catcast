@@ -1,0 +1,20 @@
+name = "catsocks"
+main = "build/worker/shim.mjs"
+compatibility_date = "2024-12-01"
+
+# `worker-build` is invoked by `wrangler dev` / `wrangler deploy` to compile
+# the crate to WASM and emit a JS shim under `build/`.
+[build]
+command = "cargo install -q worker-build && worker-build --release"
+
+# One Durable Object class per room.
+[[durable_objects.bindings]]
+name = "ROOM"
+class_name = "Room"
+
+# Hibernatable WebSockets need a stateful migration that registers `Room`
+# as a Durable Object class. Bumping this `tag` after a schema change is
+# how Cloudflare tracks DO migrations.
+[[migrations]]
+tag = "v1"
+new_classes = ["Room"]

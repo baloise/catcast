@@ -17,3 +17,6 @@ crates/catsocks/node_modules
 .idea/
 .vscode/
 *.swp
+
+# Agent worktrees / Claude scratch space
+.claude/

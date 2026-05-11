@@ -9,7 +9,16 @@ description = "CatCast WebSocket relay — Cloudflare Worker (Rust/WASM)"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
-[dependencies]
-# The `worker` crate dependency and the Durable Object implementation will
-# land alongside the wrangler config. Until then this crate is a placeholder
-# so the workspace builds cleanly.
+# The Cloudflare `worker` crate only compiles for `wasm32-unknown-unknown`,
+# so native workspace builds (and `cargo test` on Linux/Windows) see an
+# empty crate. Building for Cloudflare:
+#
+#     rustup target add wasm32-unknown-unknown
+#     cargo install -q worker-build
+#     cd crates/catsocks && worker-build --release
+#
+# (`wrangler dev` and `wrangler deploy` invoke the above automatically.)
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+worker = { version = "0.5", features = ["http"] }
+uuid = { version = "1", features = ["v4", "js"] }
+console_error_panic_hook = "0.1"
