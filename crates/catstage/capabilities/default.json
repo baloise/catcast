@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capability — allows the stage window to call every catcast command plus the bits of Tauri's core/window/webview APIs the about page touches.",
+  "windows": ["stage"],
+  "permissions": [
+    "core:default",
+    "core:window:default",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-is-fullscreen",
+    "core:webview:default",
+    "opener:default",
+    "opener:allow-open-path"
+  ]
+}

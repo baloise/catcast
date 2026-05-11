@@ -108,6 +108,11 @@ fn main() -> Result<()> {
                 if let Ok(url) = window.url() {
                     app.manage(about::AboutUrl(url));
                 }
+                // Auto-open DevTools in debug builds so JS errors / failed
+                // invokes are visible. Release builds stay closed; the
+                // [Exit] button is the only operator-facing escape hatch.
+                #[cfg(debug_assertions)]
+                window.open_devtools();
             }
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
