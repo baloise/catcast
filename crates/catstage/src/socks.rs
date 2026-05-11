@@ -9,16 +9,28 @@
 //! [`spawn`] so the dispatch path can answer `GetState`, broadcast
 //! `State` updates, etc.
 
-use anyhow::{Context, Result};
+use anyhow::Context;
 use catcast_proto::{decrypt, encrypt, Key, Message, Plaintext, ProtoError};
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 /// Inbound, post-decrypt message addressed to this stage.
 pub type InboundHandler = Arc<dyn Fn(Plaintext) + Send + Sync>;
+
+/// Reason the inner `connect_and_pump` loop exited. Used by `run` to decide
+/// whether to honour the backoff timer or reconnect immediately.
+enum Disconnect {
+    /// The outbound sender was dropped — propagate a clean shutdown.
+    Shutdown,
+    /// The operator (via about:catcast) asked us to drop and re-establish.
+    /// Skip backoff and try again straight away.
+    Forced,
+    /// Real connection error. Apply backoff and retry.
+    Error(anyhow::Error),
+}
 
 /// Spawn the socks client task.
 ///
@@ -38,9 +50,10 @@ pub fn spawn(
     name: String,
     key: Arc<Key>,
     handler: InboundHandler,
+    abort: Arc<Notify>,
 ) -> mpsc::Sender<Message> {
     let (tx, rx) = mpsc::channel::<Message>(64);
-    tokio::spawn(run(url, name, key, handler, rx));
+    tokio::spawn(run(url, name, key, handler, rx, abort));
     tx
 }
 
@@ -50,19 +63,32 @@ async fn run(
     key: Arc<Key>,
     handler: InboundHandler,
     mut rx: mpsc::Receiver<Message>,
+    abort: Arc<Notify>,
 ) {
     let mut backoff = Duration::from_millis(500);
     loop {
-        match connect_and_pump(&url, &name, &key, &handler, &mut rx).await {
-            Ok(()) => {
-                // Clean shutdown of the receiver side — exit.
+        match connect_and_pump(&url, &name, &key, &handler, &mut rx, &abort).await {
+            Disconnect::Shutdown => {
                 tracing::info!("socks: channel closed, exiting");
                 return;
             }
-            Err(e) => {
+            Disconnect::Forced => {
+                eprintln!("socks: force-reconnect requested; reconnecting now");
+                backoff = Duration::from_millis(500);
+            }
+            Disconnect::Error(e) => {
                 tracing::warn!("socks: connection error: {e:#}; reconnecting in {backoff:?}");
                 eprintln!("socks: {e:#}; reconnecting in {backoff:?}");
-                tokio::time::sleep(backoff).await;
+                // Sleep with backoff, but cut short if a force-reconnect is
+                // requested while we're waiting.
+                tokio::select! {
+                    _ = tokio::time::sleep(backoff) => {}
+                    _ = abort.notified() => {
+                        eprintln!("socks: force-reconnect during backoff; retrying immediately");
+                        backoff = Duration::from_millis(500);
+                        continue;
+                    }
+                }
                 backoff = (backoff * 2).min(Duration::from_secs(30));
             }
         }
@@ -75,18 +101,25 @@ async fn connect_and_pump(
     key: &Key,
     handler: &InboundHandler,
     rx: &mut mpsc::Receiver<Message>,
-) -> Result<()> {
-    let (ws, _resp) = tokio_tungstenite::connect_async(url)
+    abort: &Notify,
+) -> Disconnect {
+    let (ws, _resp) = match tokio_tungstenite::connect_async(url)
         .await
-        .with_context(|| format!("connecting to {url}"))?;
+        .with_context(|| format!("connecting to {url}"))
+    {
+        Ok(c) => c,
+        Err(e) => return Disconnect::Error(e),
+    };
     tracing::info!("socks: connected to {url}");
     eprintln!("socks: connected to {url}");
     let (mut sink, mut stream) = ws.split();
 
-    // Successful connect → reset caller backoff by reporting Ok at the end.
-    // Inside the loop we only return early on a *fatal* error (sink closed).
     loop {
         tokio::select! {
+            _ = abort.notified() => {
+                let _ = sink.close().await;
+                return Disconnect::Forced;
+            }
             ws_msg = stream.next() => {
                 match ws_msg {
                     Some(Ok(WsMessage::Text(text))) => {
@@ -108,23 +141,26 @@ async fn connect_and_pump(
                     }
                     Some(Ok(WsMessage::Pong(_))) | Some(Ok(WsMessage::Frame(_))) => {}
                     Some(Ok(WsMessage::Close(_))) | None => {
-                        anyhow::bail!("socket closed by peer");
+                        return Disconnect::Error(anyhow::anyhow!("socket closed by peer"));
                     }
                     Some(Err(e)) => {
-                        anyhow::bail!("ws error: {e}");
+                        return Disconnect::Error(anyhow::anyhow!("ws error: {e}"));
                     }
                 }
             }
             outbound = rx.recv() => {
                 let Some(msg) = outbound else {
-                    // sender dropped — clean shutdown
                     let _ = sink.close().await;
-                    return Ok(());
+                    return Disconnect::Shutdown;
                 };
-                let env = encrypt(key, name, &msg)
-                    .context("encrypting outbound message")?;
+                let env = match encrypt(key, name, &msg)
+                    .context("encrypting outbound message")
+                {
+                    Ok(e) => e,
+                    Err(e) => return Disconnect::Error(e),
+                };
                 if let Err(e) = sink.send(WsMessage::Text(env.into())).await {
-                    anyhow::bail!("send failed: {e}");
+                    return Disconnect::Error(anyhow::anyhow!("send failed: {e}"));
                 }
             }
         }

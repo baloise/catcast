@@ -181,7 +181,14 @@ async fn bootstrap(app: tauri::AppHandle, name: String, broker_url: String) -> R
         });
     });
 
-    let outbound = socks::spawn(broker_url.clone(), name.clone(), Arc::clone(&key), handler);
+    let socks_abort = Arc::new(tokio::sync::Notify::new());
+    let outbound = socks::spawn(
+        broker_url.clone(),
+        name.clone(),
+        Arc::clone(&key),
+        handler,
+        Arc::clone(&socks_abort),
+    );
     *out_tx.lock().unwrap() = Some(outbound.clone());
 
     let snapshot = shared.lock().unwrap().state.clone();
@@ -196,6 +203,7 @@ async fn bootstrap(app: tauri::AppHandle, name: String, broker_url: String) -> R
         logic_handle,
         out_tx,
         stage_name: name,
+        socks_abort,
     });
 
     Ok(())

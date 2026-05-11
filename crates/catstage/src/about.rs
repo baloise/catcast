@@ -16,7 +16,7 @@ use catcast_core::{Config, State};
 use catcast_proto::Message;
 use serde::Serialize;
 use tauri::{Emitter, Manager};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 
 use crate::logic::{self, LogicHandle, Plan};
 use crate::scheduler;
@@ -32,11 +32,14 @@ pub struct TauriCtx {
     pub broker_url: String,
     pub sched_tx: mpsc::Sender<scheduler::Cmd>,
     pub logic_handle: Arc<Mutex<Option<LogicHandle>>>,
-    /// Kept for later use by `cmd_force_reconnect` and `Message::GetState`
-    /// replies that need to push a State to the broker.
+    /// Kept for later use by `Message::GetState` replies that need to push a
+    /// State to the broker.
     #[allow(dead_code)]
     pub out_tx: Arc<Mutex<Option<mpsc::Sender<Message>>>>,
     pub stage_name: String,
+    /// `cmd_force_reconnect` notifies this so the socks task drops its
+    /// current connection and tries again immediately.
+    pub socks_abort: Arc<Notify>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -140,10 +143,10 @@ pub async fn cmd_toggle_fullscreen(window: tauri::Window) -> Result<(), String> 
 }
 
 #[tauri::command]
-pub async fn cmd_force_reconnect(_ctx: tauri::State<'_, TauriCtx>) -> Result<(), String> {
-    // TODO(catstage/socks): wire an abort signal into socks::spawn so we can
-    // drop the current connection and respawn the task. For v1 we surface
-    // this button but it's a no-op — operators can restart the stage.
+pub async fn cmd_force_reconnect(ctx: tauri::State<'_, TauriCtx>) -> Result<(), String> {
+    // Poke the socks task: it drops the current WebSocket (or cuts a backoff
+    // sleep short) and reconnects immediately.
+    ctx.socks_abort.notify_one();
     Ok(())
 }
 
