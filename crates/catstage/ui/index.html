@@ -147,6 +147,26 @@
       form.inline { display: flex; flex-direction: column; gap: 8px; }
       form.inline .field { display: flex; gap: 8px; align-items: center; }
       form.inline .field label { width: 80px; color: var(--muted); }
+      /* In-app confirm modal — themed replacement for native confirm() */
+      .modal-overlay {
+        position: fixed; inset: 0;
+        background: rgba(0, 0, 0, 0.7);
+        display: flex; align-items: center; justify-content: center;
+        z-index: 1000;
+      }
+      .modal-overlay[hidden] { display: none; }
+      .modal {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 20px 24px;
+        min-width: 280px; max-width: 420px;
+        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+      }
+      .modal p { margin: 0 0 16px; color: var(--text); font-size: 15px; }
+      .modal .modal-actions {
+        display: flex; gap: 8px; justify-content: flex-end;
+      }
     </style>
   </head>
   <body>
@@ -245,6 +265,17 @@
         <kbd>F11</kbd> toggle fullscreen ·
         <kbd>Esc</kbd> exit manual
       </section>
+    </div>
+
+    <!-- Themed replacement for native confirm() — see confirmDialog() below. -->
+    <div id="confirm-modal" class="modal-overlay" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="confirm-msg">
+        <p id="confirm-msg">…</p>
+        <div class="modal-actions">
+          <button id="confirm-cancel">Cancel</button>
+          <button id="confirm-ok" class="danger">OK</button>
+        </div>
+      </div>
     </div>
 
     <script>
@@ -368,12 +399,45 @@
           return invoke("get_snapshot").then(render).catch((e) => console.error(e));
         }
 
+        // Themed replacement for window.confirm(): returns a Promise<boolean>.
+        // Native confirm() on WebKitGTK leaks a "JavaScript - tauri://..."
+        // header and sometimes locks page scroll until reload.
+        function confirmDialog(msg) {
+          return new Promise((resolve) => {
+            const modal = document.getElementById("confirm-modal");
+            document.getElementById("confirm-msg").textContent = msg;
+            const ok = document.getElementById("confirm-ok");
+            const cancel = document.getElementById("confirm-cancel");
+            const escListener = (ev) => {
+              if (ev.key === "Escape") {
+                ev.stopPropagation();
+                close(false);
+              } else if (ev.key === "Enter") {
+                ev.stopPropagation();
+                close(true);
+              }
+            };
+            const close = (result) => {
+              modal.hidden = true;
+              ok.onclick = null;
+              cancel.onclick = null;
+              document.removeEventListener("keydown", escListener, true);
+              resolve(result);
+            };
+            ok.onclick = () => close(true);
+            cancel.onclick = () => close(false);
+            document.addEventListener("keydown", escListener, true);
+            modal.hidden = false;
+            cancel.focus();
+          });
+        }
+
         // Actions row.
         document.querySelectorAll("button[data-cmd]").forEach((btn) => {
-          btn.addEventListener("click", () => {
+          btn.addEventListener("click", async () => {
             const cmd = btn.dataset.cmd;
             const confirmMsg = btn.dataset.confirm;
-            if (confirmMsg && !confirm(confirmMsg)) return;
+            if (confirmMsg && !(await confirmDialog(confirmMsg))) return;
             let args = {};
             if (btn.dataset.argOn !== undefined) {
               args.on = btn.dataset.argOn === "true";
