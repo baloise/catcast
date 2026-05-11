@@ -71,3 +71,37 @@ authentication tokens, no internal hostnames) so it's safe to share.
 If you see a proxy interstitial / HTML where a binary should be, save
 the body as `interstitial.html` too — it sometimes tells us which
 rule blocked the request.
+
+## Findings so far (2026-05-11)
+
+Run from a Baloise WSL host (proxy `HTTP_PROXY` set to a generic
+gateway) **and** from native Windows 11 via PowerShell over WSL
+interop. Results disagree, which is itself informative:
+
+- **WSL side:** GH Release `.zip` downloads pass through unmodified
+  (ZIP magic verified in the first bytes). `raw.githubusercontent.com`
+  is blocked by a Smoothwall/Forcepoint filter (`_sm_nck=1`
+  fingerprint), but Tauri doesn't need it.
+- **Windows side (Zscaler via `proxy-pac.balgroupit.com/ZS_ch_ch.pac`):**
+  GH Release `.zip` downloads **fail with "connection forcibly closed"
+  by the remote host** — classic content-inspection block from
+  Zscaler. The GH API (JSON) and `workers.dev` still pass.
+
+Conclusion: **the default Tauri updater path is not viable on the
+real stage target.** Pick one of these:
+
+1. **CF Worker update proxy.** Build a small Worker that fetches the
+   release binary server-side from GitHub (no Zscaler in that hop)
+   and streams it back to the stage. The stage downloads from
+   `https://<account>.workers.dev/...`. Open risk: Zscaler may still
+   sniff the *response* stream and cut it when it sees binary bytes.
+   Needs a follow-up probe — see `spike/cf-worker-proxy/` (TBD).
+2. **Base64-text repackaging.** Encode the update payload as a `.txt`
+   and have the stage decode-and-apply. Zscaler is more permissive on
+   text MIME but still inspects bodies; needs its own probe.
+3. **Manual updates.** Ship by hand. For 1–2 screens with rare
+   updates this is honestly fine and matches the "install is tedious"
+   tolerance baked into v1.
+
+Until one of these is committed to, **the Tauri updater is not
+wired in catstage**. Treat catstage as build-and-drop.
