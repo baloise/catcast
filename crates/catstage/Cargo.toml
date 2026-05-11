@@ -22,7 +22,19 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 directories = { workspace = true }
 chrono = { workspace = true }
+cron = { workspace = true }
+humantime = { workspace = true }
 
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
+
+rhai = { version = "1.21", features = ["sync"] }
+gethostname = "1"
+tracing = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+mslnk = "0.1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
