@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>about:catcast</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0e1116;
+        --panel: #161b22;
+        --line: #2a313a;
+        --text: #e6edf3;
+        --muted: #8b949e;
+        --accent: #58a6ff;
+        --ok: #3fb950;
+        --warn: #d29922;
+        --err: #f85149;
+        --font: ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; padding: 0;
+        background: var(--bg); color: var(--text);
+        font-family: var(--font); font-size: 14px;
+        min-height: 100vh;
+      }
+      .wrap { max-width: 1100px; margin: 0 auto; padding: 24px; }
+      header {
+        display: flex; align-items: baseline; justify-content: space-between;
+        gap: 16px; padding-bottom: 16px; border-bottom: 1px solid var(--line);
+      }
+      header h1 { margin: 0; font-size: 28px; font-weight: 600; }
+      header .meta { color: var(--muted); font-size: 13px; }
+      header .broker { display: flex; align-items: center; gap: 8px; }
+      .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); display: inline-block; }
+      .dot.up { background: var(--ok); }
+      .dot.down { background: var(--err); }
+      section {
+        margin-top: 20px; padding: 16px;
+        background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+      }
+      section h2 { margin: 0 0 12px; font-size: 14px; font-weight: 600; text-transform: uppercase; color: var(--muted); letter-spacing: 0.05em; }
+      .row { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
+      .row + .row { border-top: 1px dashed var(--line); }
+      .row code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--text); }
+      .row .label { width: 130px; color: var(--muted); }
+      .check { width: 18px; text-align: center; }
+      .check.yes { color: var(--ok); }
+      .check.no { color: var(--err); }
+      input[type="text"], input[type="url"] {
+        flex: 1; padding: 8px 10px; background: #0d1117; color: var(--text);
+        border: 1px solid var(--line); border-radius: 4px; font-family: var(--font);
+        font-size: 14px;
+      }
+      input[type="text"]:focus, input[type="url"]:focus {
+        outline: none; border-color: var(--accent);
+      }
+      button {
+        padding: 8px 14px; background: #21262d; color: var(--text);
+        border: 1px solid var(--line); border-radius: 4px; cursor: pointer;
+        font-family: var(--font); font-size: 13px;
+      }
+      button:hover { background: #2d333b; border-color: #444c56; }
+      button.primary { background: #1f6feb; border-color: #1f6feb; color: white; }
+      button.primary:hover { background: #388bfd; }
+      .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+      .hints { color: var(--muted); font-size: 13px; }
+      .hints kbd {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        background: #21262d; border: 1px solid var(--line); padding: 2px 6px;
+        border-radius: 3px; font-size: 12px;
+      }
+      .status-grid { display: grid; grid-template-columns: 130px 1fr; gap: 8px 16px; }
+      .status-grid .k { color: var(--muted); }
+      .pill {
+        display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px;
+        background: #21262d; border: 1px solid var(--line);
+      }
+      .pill.paused { color: var(--warn); border-color: var(--warn); }
+      .pill.playing { color: var(--ok); border-color: var(--ok); }
+      .pill.manual { color: var(--accent); border-color: var(--accent); }
+      form.inline { display: flex; flex-direction: column; gap: 8px; }
+      form.inline .field { display: flex; gap: 8px; align-items: center; }
+      form.inline .field label { width: 80px; color: var(--muted); }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <div>
+          <h1 id="stage-name">…</h1>
+          <div class="meta">
+            CatCast <span id="version">…</span>
+          </div>
+        </div>
+        <div class="broker">
+          <span class="dot" id="conn-dot"></span>
+          <code id="broker-url">…</code>
+        </div>
+      </header>
+
+      <section>
+        <h2>Navigate</h2>
+        <div class="row">
+          <input id="url-bar" type="url" placeholder="https://example.com" />
+          <button id="go-btn" class="primary">Go</button>
+        </div>
+      </section>
+
+      <section>
+        <h2>Status</h2>
+        <div class="status-grid">
+          <div class="k">Mode</div><div><span id="mode-pill" class="pill">…</span></div>
+          <div class="k">Current URL</div><div><code id="current-url">—</code></div>
+          <div class="k">Has config</div><div id="has-config">—</div>
+          <div class="k">Has logic</div><div id="has-logic">—</div>
+          <div class="k">Since</div><div id="since">—</div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Files</h2>
+        <div id="files"></div>
+      </section>
+
+      <section>
+        <h2>Autostart</h2>
+        <div id="autostart"></div>
+      </section>
+
+      <section>
+        <h2>Actions</h2>
+        <div class="actions">
+          <button data-cmd="cmd_pause">Pause</button>
+          <button data-cmd="cmd_play">Play</button>
+          <button data-cmd="cmd_manual" data-arg-on="true">Manual on</button>
+          <button data-cmd="cmd_manual" data-arg-on="false">Manual off</button>
+          <button data-cmd="cmd_toggle_fullscreen">Toggle Fullscreen</button>
+          <button data-cmd="cmd_force_reconnect">Force reconnect</button>
+          <button data-cmd="cmd_reload_from_disk">Reload from disk</button>
+        </div>
+      </section>
+
+      <section class="hints">
+        Shortcuts:
+        <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>M</kbd> toggle manual ·
+        <kbd>F11</kbd> toggle fullscreen ·
+        <kbd>Esc</kbd> exit manual
+      </section>
+    </div>
+
+    <script>
+      (function () {
+        const tauri = window.__TAURI__ || {};
+        const invoke =
+          (tauri.core && tauri.core.invoke) || tauri.invoke ||
+          (() => Promise.reject(new Error("Tauri bridge not available")));
+        const listen =
+          (tauri.event && tauri.event.listen) ||
+          (() => Promise.resolve(() => {}));
+
+        const initial = window.__CATCAST__ || {};
+
+        function fmtSince(ms) {
+          if (!ms) return "—";
+          try { return new Date(ms).toLocaleString(); } catch (_) { return String(ms); }
+        }
+
+        function render(snap) {
+          document.getElementById("stage-name").textContent = snap.state.name || "(unnamed)";
+          document.getElementById("version").textContent = "v" + (snap.state.version || "?");
+          document.getElementById("broker-url").textContent = snap.broker_url || "(no broker)";
+          const dot = document.getElementById("conn-dot");
+          dot.classList.remove("up", "down");
+          if (snap.connection === "up") dot.classList.add("up");
+          else if (snap.connection === "down") dot.classList.add("down");
+
+          const pill = document.getElementById("mode-pill");
+          pill.classList.remove("paused", "playing", "manual");
+          let mode = "playing", text = "Playing";
+          if (snap.state.manual) { mode = "manual"; text = "Manual"; }
+          else if (snap.state.paused) { mode = "paused"; text = "Paused"; }
+          pill.classList.add(mode);
+          pill.textContent = text;
+
+          document.getElementById("current-url").textContent = snap.state.current_url || "—";
+          document.getElementById("has-config").textContent = snap.state.has_config ? "yes" : "no";
+          document.getElementById("has-logic").textContent = snap.state.has_logic ? "yes" : "no";
+          document.getElementById("since").textContent = fmtSince(snap.state.since);
+
+          const files = document.getElementById("files");
+          files.innerHTML = "";
+          (snap.files || []).forEach((f) => {
+            const row = document.createElement("div");
+            row.className = "row";
+            const check = document.createElement("span");
+            check.className = "check " + (f.exists ? "yes" : "no");
+            check.textContent = f.exists ? "✓" : "✗";
+            const label = document.createElement("span");
+            label.className = "label";
+            label.textContent = f.label;
+            const path = document.createElement("code");
+            path.style.flex = "1";
+            path.style.overflow = "hidden";
+            path.style.textOverflow = "ellipsis";
+            path.textContent = f.path || "(unavailable)";
+            const btn = document.createElement("button");
+            btn.textContent = "Open dir";
+            btn.onclick = () => invoke("cmd_open_dir", { path: f.path });
+            row.append(check, label, path, btn);
+            files.appendChild(row);
+          });
+
+          const auto = document.getElementById("autostart");
+          auto.innerHTML = "";
+          if (snap.autostart_path) {
+            const row = document.createElement("div");
+            row.className = "row";
+            row.innerHTML = `<span class="label">Installed</span><code style="flex:1">${snap.autostart_path}</code>`;
+            const reinstall = document.createElement("button");
+            reinstall.textContent = "Re-install with current args";
+            reinstall.onclick = () => invoke("cmd_install_autostart", {
+              name: snap.state.name, socks: snap.broker_url || ""
+            }).then(refresh).catch((e) => alert("Re-install failed: " + e));
+            const opendir = document.createElement("button");
+            opendir.textContent = "Open shortcut location";
+            opendir.onclick = () => invoke("cmd_open_dir", { path: snap.autostart_path });
+            row.append(reinstall, opendir);
+            auto.appendChild(row);
+          } else {
+            const form = document.createElement("form");
+            form.className = "inline";
+            form.innerHTML = `
+              <div class="field"><label>Name</label>
+                <input id="auto-name" type="text" value="${snap.state.name || ""}" /></div>
+              <div class="field"><label>Socks</label>
+                <input id="auto-socks" type="url" value="${snap.broker_url || ""}" /></div>
+              <div class="field"><label></label>
+                <button id="auto-install" class="primary" type="submit">Install autostart</button>
+                <span class="hints" id="auto-hint"></span>
+              </div>
+            `;
+            form.onsubmit = (ev) => {
+              ev.preventDefault();
+              const name = document.getElementById("auto-name").value.trim();
+              const socks = document.getElementById("auto-socks").value.trim();
+              invoke("cmd_install_autostart", { name, socks })
+                .then((path) => {
+                  if (path) refresh();
+                  else {
+                    document.getElementById("auto-hint").textContent =
+                      "(no-op on this platform)";
+                  }
+                })
+                .catch((e) => alert("Install failed: " + e));
+            };
+            auto.appendChild(form);
+          }
+        }
+
+        function refresh() {
+          return invoke("get_snapshot").then(render).catch((e) => console.error(e));
+        }
+
+        // Actions row.
+        document.querySelectorAll("button[data-cmd]").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            const cmd = btn.dataset.cmd;
+            let args = {};
+            if (btn.dataset.argOn !== undefined) {
+              args.on = btn.dataset.argOn === "true";
+            }
+            invoke(cmd, args).catch((e) => alert(cmd + " failed: " + e));
+          });
+        });
+
+        // URL bar.
+        const goBtn = document.getElementById("go-btn");
+        const urlBar = document.getElementById("url-bar");
+        function go() {
+          const url = urlBar.value.trim();
+          if (!url) return;
+          invoke("cmd_nav", { url }).catch((e) => alert("nav failed: " + e));
+        }
+        goBtn.addEventListener("click", go);
+        urlBar.addEventListener("keydown", (ev) => {
+          if (ev.key === "Enter") go();
+        });
+
+        // Window-focused hotkeys (the about:catcast page IS manual mode, so
+        // catching keys here is sufficient — see plan).
+        document.addEventListener("keydown", (ev) => {
+          if (ev.ctrlKey && ev.altKey && (ev.key === "m" || ev.key === "M")) {
+            ev.preventDefault();
+            invoke("cmd_hotkey_toggle_manual").catch((e) => console.error(e));
+          } else if (ev.key === "F11") {
+            ev.preventDefault();
+            invoke("cmd_toggle_fullscreen").catch((e) => console.error(e));
+          } else if (ev.key === "Escape") {
+            ev.preventDefault();
+            invoke("cmd_hotkey_escape").catch((e) => console.error(e));
+          }
+        });
+
+        // Live updates.
+        listen("catcast://state", (ev) => {
+          if (ev && ev.payload) render(ev.payload);
+        });
+        listen("catcast://connection", () => {
+          // Connection events trigger a snapshot refresh — cheaper than
+          // duplicating the per-field merge logic here.
+          refresh();
+        });
+
+        if (initial.state) render(initial);
+        refresh();
+      })();
+    </script>
+  </body>
+</html>

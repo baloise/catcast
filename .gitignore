@@ -6,6 +6,7 @@ Cargo.lock.bak
 # Tauri
 crates/catstage/target
 crates/catstage/dist
+crates/catstage/gen/
 
 # Cloudflare worker build artifacts
 crates/catsocks/build

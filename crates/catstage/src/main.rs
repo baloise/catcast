@@ -1,31 +1,36 @@
-//! catstage — CatCast fullscreen viewer (headless skeleton).
+//! catstage — CatCast fullscreen viewer.
 //!
-//! This binary is intentionally headless for now: the Tauri/WebView2 shell,
-//! the `about:catcast` URI handler, and the global Ctrl+Alt+M hotkey are
-//! deferred to a follow-up. The rest of the runtime — persistence, socks
-//! client, Rhai logic engine, rotation scheduler — runs end-to-end on Linux
-//! so we can validate the protocol without standing up a WebKitGTK toolchain.
+//! Tauri 2.x shell. Owns the fullscreen WebView2 window, hosts the
+//! `about:catcast` URI scheme, and runs the scheduler/socks/Rhai engine in
+//! the same tokio runtime Tauri starts.
 //!
-//! TODO(tauri): wrap this in a Tauri 2.x app, render `about:catcast` and
-//! configured URLs in a fullscreen WebView2 window, replace each "would …"
-//! stderr line with a real `tauri::Manager::emit` call.
-//! TODO(hotkey): register the global Ctrl+Alt+M hotkey to toggle manual mode.
+//! Window-focused hotkeys (Ctrl+Alt+M, F11, Esc) are caught by a JS keydown
+//! listener inside `about:catcast` and forwarded to Rust via `invoke` — chosen
+//! because Tauri 2 doesn't yet expose a stable Rust-side window key handler.
+
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use catcast_core::{Config, State};
 use catcast_proto::{Key, Message};
 use clap::Parser;
-use std::sync::{Arc, Mutex};
+use tauri::Manager;
 
+mod about;
 mod autostart;
 mod logic;
 mod persist;
 mod scheduler;
 mod socks;
 
+use crate::about::TauriCtx;
 use crate::logic::{LogicHandle, Plan};
 
-#[derive(Parser)]
+const WINDOW_LABEL: &str = "stage";
+
+#[derive(Parser, Clone)]
 #[command(name = "catstage", version, about = "CatCast fullscreen viewer")]
 struct Args {
     /// WebSocket URL of the CatSocks broker, e.g. wss://.../r/<room>.
@@ -36,17 +41,20 @@ struct Args {
     #[arg(long)]
     name: Option<String>,
 
-    /// Drop a Startup-folder shortcut so this stage launches at login, then exit.
+    /// Drop a Startup-folder shortcut so this stage launches at login,
+    /// then exit. (The about:catcast wizard does the same thing
+    /// interactively.)
     #[arg(long)]
     install_autostart: bool,
 }
 
 /// Everything the dispatch path mutates. Held behind one mutex so the socks
-/// handler doesn't need a separate lock per field.
-struct Shared {
-    state: State,
-    config_yaml: Option<String>,
-    logic_rhai: Option<String>,
+/// handler doesn't need a separate lock per field. `pub(crate)` so `about.rs`
+/// can use it in `TauriCtx`.
+pub(crate) struct Shared {
+    pub state: State,
+    pub config_yaml: Option<String>,
+    pub logic_rhai: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -63,19 +71,47 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    rt.block_on(run(args, name))
+    eprintln!("catstage v{} starting as {name}", env!("CARGO_PKG_VERSION"),);
+
+    let broker_url = args.socks.clone();
+    let stage_name = name.clone();
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .invoke_handler(tauri::generate_handler![
+            about::get_snapshot,
+            about::cmd_pause,
+            about::cmd_play,
+            about::cmd_manual,
+            about::cmd_toggle_fullscreen,
+            about::cmd_force_reconnect,
+            about::cmd_reload_from_disk,
+            about::cmd_install_autostart,
+            about::cmd_nav,
+            about::cmd_open_dir,
+            about::cmd_hotkey_toggle_manual,
+            about::cmd_hotkey_escape,
+        ])
+        .register_uri_scheme_protocol("about", |ctx, req| {
+            about_scheme_response(ctx.app_handle(), req)
+        })
+        .setup(move |app| {
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = bootstrap(handle, stage_name, broker_url).await {
+                    eprintln!("catstage: bootstrap failed: {e:#}");
+                }
+            });
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .map_err(|e| anyhow::anyhow!("tauri runtime: {e}"))
 }
 
-async fn run(args: Args, name: String) -> Result<()> {
-    eprintln!(
-        "catstage v{} ready as {name}; about:catcast would show the splash",
-        env!("CARGO_PKG_VERSION"),
-    );
-
-    // Load disk state.
+/// Wire up scheduler + socks once Tauri's runtime is alive. Mirrors the old
+/// `run()` function but pushes scheduler events through Tauri instead of
+/// blocking on ctrl-c at the end.
+async fn bootstrap(app: tauri::AppHandle, name: String, broker_url: String) -> Result<()> {
     let initial_state = match persist::load_state()? {
         Some(s) => s,
         None => State::fresh(&name, env!("CARGO_PKG_VERSION")),
@@ -85,7 +121,7 @@ async fn run(args: Args, name: String) -> Result<()> {
 
     if config_yaml.is_none() && logic_rhai.is_none() {
         eprintln!(
-            "catstage: no config/logic on disk — would show stage name '{name}' big and centred"
+            "catstage: no config/logic on disk — about:catcast splash with stage name '{name}'"
         );
     }
 
@@ -95,10 +131,8 @@ async fn run(args: Args, name: String) -> Result<()> {
         logic_rhai: logic_rhai.clone(),
     }));
 
-    // Pre-derive AEAD key for this stage's PSK.
     let key = Arc::new(Key::from_psk(&name).context("deriving AEAD key from stage name")?);
 
-    // Build the initial plan from disk state (if any).
     let logic_handle: Arc<Mutex<Option<LogicHandle>>> = Arc::new(Mutex::new(None));
     let initial_plan = match (&config_yaml, &logic_rhai) {
         (Some(yaml), Some(rhai)) => match build_plan(yaml, rhai, &logic_handle) {
@@ -116,11 +150,10 @@ async fn run(args: Args, name: String) -> Result<()> {
         _ => Plan::default(),
     };
 
-    // Wire scheduler events to update shared state and broadcast.
-    // We need the outbound socks sender, but the scheduler is spawned *before*
-    // the socks client; punt via an Arc<Mutex<Option<Sender>>>.
     let out_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<Message>>>> = Arc::new(Mutex::new(None));
+
     let events = Arc::new(SchedEvents {
+        app: app.clone(),
         shared: Arc::clone(&shared),
         out: Arc::clone(&out_tx),
     });
@@ -131,34 +164,40 @@ async fn run(args: Args, name: String) -> Result<()> {
         events.clone(),
     );
 
-    // Build the socks inbound handler.
     let handler_shared = Arc::clone(&shared);
     let handler_sched = sched_tx.clone();
     let handler_logic = Arc::clone(&logic_handle);
     let handler_out = Arc::clone(&out_tx);
+    let handler_app = app.clone();
     let handler: socks::InboundHandler = Arc::new(move |pt| {
         let pt_msg = pt.msg.clone();
         let shared = Arc::clone(&handler_shared);
         let sched = handler_sched.clone();
         let logic = Arc::clone(&handler_logic);
         let out = Arc::clone(&handler_out);
+        let app = handler_app.clone();
         tokio::spawn(async move {
-            dispatch(pt_msg, shared, sched, logic, out).await;
+            dispatch(pt_msg, shared, sched, logic, out, app).await;
         });
     });
 
-    let outbound = socks::spawn(args.socks.clone(), name.clone(), Arc::clone(&key), handler);
+    let outbound = socks::spawn(broker_url.clone(), name.clone(), Arc::clone(&key), handler);
     *out_tx.lock().unwrap() = Some(outbound.clone());
 
-    // Send an unsolicited State on connect so listening CLIs catch up.
-    // The socks task queues this until the connection is up.
     let snapshot = shared.lock().unwrap().state.clone();
     let _ = outbound.send(Message::State(snapshot)).await;
 
-    // Keep the runtime alive forever; the scheduler + socks tasks own the
-    // actual work.
-    tokio::signal::ctrl_c().await.ok();
-    eprintln!("catstage: shutting down");
+    // Register the Tauri context so commands and the URI scheme handler can
+    // reach the scheduler / shared state.
+    app.manage(TauriCtx {
+        shared: Arc::clone(&shared),
+        broker_url,
+        sched_tx,
+        logic_handle,
+        out_tx,
+        stage_name: name,
+    });
+
     Ok(())
 }
 
@@ -167,26 +206,64 @@ fn default_name() -> String {
     raw.to_string_lossy().to_string()
 }
 
+/// `about:catcast` URI scheme response. Anything else under `about:` 404s.
+fn about_scheme_response(
+    app: &tauri::AppHandle,
+    request: tauri::http::Request<Vec<u8>>,
+) -> tauri::http::Response<Vec<u8>> {
+    let uri = request.uri().to_string();
+    // Tauri normalises `about:catcast` to `about://catcast/...` depending on
+    // platform — match on the suffix instead of the full URI.
+    if !uri.contains("catcast") {
+        return tauri::http::Response::builder()
+            .status(404)
+            .header("Content-Type", "text/plain")
+            .body(b"about: not found".to_vec())
+            .unwrap();
+    }
+    let html = if let Some(ctx) = app.try_state::<TauriCtx>() {
+        about::render_about_html(&about::make_snapshot(&ctx))
+    } else {
+        // setup() hasn't finished managing TauriCtx yet — serve the page with
+        // a placeholder blob; the JS bootstraps itself via get_snapshot once
+        // TauriCtx exists.
+        about::render_about_html(&about::Snapshot {
+            state: State::fresh("(loading)", env!("CARGO_PKG_VERSION")),
+            broker_url: String::new(),
+            stage_name: "(loading)".into(),
+            files: Vec::new(),
+            autostart_path: None,
+        })
+    };
+    tauri::http::Response::builder()
+        .status(200)
+        .header("Content-Type", "text/html; charset=utf-8")
+        .body(html.into_bytes())
+        .unwrap()
+}
+
 struct SchedEvents {
+    app: tauri::AppHandle,
     shared: Arc<Mutex<Shared>>,
     out: Arc<Mutex<Option<tokio::sync::mpsc::Sender<Message>>>>,
 }
 
 impl scheduler::Events for SchedEvents {
     fn on_url_change(&self, url: &str) {
-        eprintln!("catstage: would navigate to {url}");
         let mut sh = self.shared.lock().unwrap();
-        if sh.state.current_url.as_deref() != Some(url) {
-            sh.state.current_url = Some(url.to_string());
-            sh.state.since = chrono::Utc::now().timestamp_millis();
-            let snap = sh.state.clone();
-            drop(sh);
-            broadcast(&self.out, Message::State(snap));
-            // Persist asynchronously-ish — fire-and-forget.
-            if let Err(e) = persist::save_state(&self.shared.lock().unwrap().state) {
-                eprintln!("catstage: state save failed: {e:#}");
-            }
+        if sh.state.current_url.as_deref() == Some(url) {
+            return;
         }
+        sh.state.current_url = Some(url.to_string());
+        sh.state.since = chrono::Utc::now().timestamp_millis();
+        let snap = sh.state.clone();
+        drop(sh);
+        broadcast(&self.out, Message::State(snap));
+        if let Err(e) = persist::save_state(&self.shared.lock().unwrap().state) {
+            eprintln!("catstage: state save failed: {e:#}");
+        }
+        steer_webview(&self.app, url);
+        about::emit_state(&self.app, WINDOW_LABEL);
     }
     fn on_pause_change(&self, paused: bool) {
         let mut sh = self.shared.lock().unwrap();
@@ -195,18 +272,34 @@ impl scheduler::Events for SchedEvents {
         let snap = sh.state.clone();
         drop(sh);
         broadcast(&self.out, Message::State(snap));
+        about::emit_state(&self.app, WINDOW_LABEL);
     }
     fn on_manual_change(&self, manual: bool) {
-        eprintln!(
-            "catstage: manual mode {}",
-            if manual { "on" } else { "off" }
-        );
         let mut sh = self.shared.lock().unwrap();
         sh.state.manual = manual;
         sh.state.since = chrono::Utc::now().timestamp_millis();
         let snap = sh.state.clone();
         drop(sh);
         broadcast(&self.out, Message::State(snap));
+        about::emit_state(&self.app, WINDOW_LABEL);
+    }
+}
+
+/// Drive the kiosk webview to `url` unless we're in manual mode (where the
+/// operator owns the URL bar) or unless the URL starts with `about:`
+/// (handled by the URI scheme).
+fn steer_webview(app: &tauri::AppHandle, url: &str) {
+    let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
+        return;
+    };
+    let Some(ctx) = app.try_state::<TauriCtx>() else {
+        return;
+    };
+    if ctx.shared.lock().unwrap().state.manual {
+        return;
+    }
+    if let Ok(parsed) = tauri::Url::parse(url) {
+        let _ = window.navigate(parsed);
     }
 }
 
@@ -214,7 +307,6 @@ fn broadcast(out: &Arc<Mutex<Option<tokio::sync::mpsc::Sender<Message>>>>, msg: 
     let Some(tx) = out.lock().unwrap().clone() else {
         return;
     };
-    // Don't block — drop if the channel is full or the socks task is gone.
     let _ = tx.try_send(msg);
 }
 
@@ -224,6 +316,7 @@ async fn dispatch(
     sched: tokio::sync::mpsc::Sender<scheduler::Cmd>,
     logic_handle: Arc<Mutex<Option<LogicHandle>>>,
     out: Arc<Mutex<Option<tokio::sync::mpsc::Sender<Message>>>>,
+    app: tauri::AppHandle,
 ) {
     use scheduler::Cmd;
     match msg {
@@ -269,6 +362,7 @@ async fn dispatch(
                     sh.state.has_config = true;
                 }
                 rebuild_and_send(&shared, &sched, &logic_handle).await;
+                about::emit_state(&app, WINDOW_LABEL);
             }
             Err(e) => eprintln!("catstage: bad config YAML: {e}"),
         },
@@ -282,6 +376,7 @@ async fn dispatch(
                 sh.state.has_logic = true;
             }
             rebuild_and_send(&shared, &sched, &logic_handle).await;
+            about::emit_state(&app, WINDOW_LABEL);
         }
         Message::GetState => {
             let snap = shared.lock().unwrap().state.clone();

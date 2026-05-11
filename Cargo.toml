@@ -50,3 +50,16 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true
+
+# Zscaler in our dev environment blocks several crates.io downloads as
+# false positives. These patches route around them while CI / Windows
+# stage boxes (which don't sit behind Zscaler) get the upstream crates.
+# Drop these patches once the affected crates are allowlisted by IT.
+[patch.crates-io]
+# `cfb` is pulled in transitively via `infer` → `tauri-utils`. The OLE
+# Compound File Binary format trips Zscaler. vendor/cfb-stub is a no-op
+# shim — see its README.
+cfb = { path = "vendor/cfb-stub" }
+# `libloading` is pulled in by Tauri (Wry's webkit interop). Git source
+# matches version 0.7.4 exactly via tag.
+libloading = { git = "https://github.com/nagisa/rust_libloading.git", tag = "0.7.4" }

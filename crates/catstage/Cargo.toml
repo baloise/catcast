@@ -10,6 +10,9 @@ description = "CatCast fullscreen viewer"
 name = "catstage"
 path = "src/main.rs"
 
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
 [dependencies]
 catcast-core = { workspace = true }
 catcast-proto = { workspace = true }
@@ -32,6 +35,9 @@ futures-util = { workspace = true }
 rhai = { version = "1.21", features = ["sync"] }
 gethostname = "1"
 tracing = "0.1"
+
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
 
 [target.'cfg(windows)'.dependencies]
 mslnk = "0.1"

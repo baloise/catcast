@@ -1,73 +1,87 @@
-//! Auto-start installer for catstage.
+//! Autostart installer.
 //!
-//! On Windows we drop a `.lnk` shortcut into the per-user Startup folder, so
-//! the stage relaunches at every login with the operator's `--socks`/`--name`
-//! preserved. No admin rights, no registry edits.
+//! On Windows we drop a `.lnk` into the per-user Startup folder. The shortcut
+//! points at the running `catstage.exe` with the same `--socks` / `--name`
+//! arguments the wizard collected. No admin rights required.
 //!
-//! On non-Windows targets we print a friendly note and write nothing —
-//! catstage is Windows-only in v1, but this module compiles everywhere so the
-//! rest of the crate can be developed on Linux/WSL.
+//! On non-Windows targets the function is a no-op that returns a friendly
+//! message — the about:catcast UI surfaces it to the operator.
 
-use anyhow::Result;
 use std::path::PathBuf;
 
-/// Arguments to persist into the autostart shortcut.
+use anyhow::Result;
+
 #[derive(Debug, Clone)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub struct AutostartArgs {
+    /// `--socks <wss://...>` that the autostarted process should use.
     pub socks: String,
+    /// Optional `--name <stage-name>` override.
     pub name: Option<String>,
 }
 
-impl AutostartArgs {
-    /// Reproduce the command-line the shortcut needs to invoke.
-    pub fn to_cli_args(&self) -> Vec<String> {
-        let mut v = vec!["--socks".into(), self.socks.clone()];
-        if let Some(n) = &self.name {
-            v.push("--name".into());
-            v.push(n.clone());
-        }
-        v
-    }
-}
-
+/// Install (or replace) the Startup-folder shortcut. Returns the path to the
+/// shortcut on success, or `Ok(None)` on platforms where autostart is a no-op
+/// in this build.
 #[cfg(target_os = "windows")]
 pub fn install(args: &AutostartArgs) -> Result<Option<PathBuf>> {
-    use anyhow::Context;
     use mslnk::ShellLink;
 
-    let exe = std::env::current_exe().context("locating current executable")?;
-    let appdata = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .context("APPDATA env var missing")?;
-    let startup = appdata
-        .join("Microsoft")
-        .join("Windows")
-        .join("Start Menu")
-        .join("Programs")
-        .join("Startup");
-    std::fs::create_dir_all(&startup).with_context(|| format!("creating {}", startup.display()))?;
+    let startup = startup_dir()?;
+    std::fs::create_dir_all(&startup)?;
+    let target = std::env::current_exe()?;
     let lnk_path = startup.join("catstage.lnk");
 
-    let mut link =
-        ShellLink::new(&exe).with_context(|| format!("building shortcut for {}", exe.display()))?;
-    link.set_arguments(Some(args.to_cli_args().join(" ")));
-    link.set_name(Some("CatCast Stage".into()));
-    link.create_lnk(&lnk_path)
-        .with_context(|| format!("writing {}", lnk_path.display()))?;
+    let mut args_str = format!("--socks {}", shell_quote(&args.socks));
+    if let Some(name) = &args.name {
+        args_str.push_str(&format!(" --name {}", shell_quote(name)));
+    }
+
+    let mut sl = ShellLink::new(target)?;
+    sl.set_arguments(Some(args_str));
+    sl.create_lnk(&lnk_path)?;
     Ok(Some(lnk_path))
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn install(args: &AutostartArgs) -> Result<Option<PathBuf>> {
-    let cli = std::iter::once("catstage".to_string())
-        .chain(args.to_cli_args())
-        .collect::<Vec<_>>()
-        .join(" ");
-    eprintln!(
-        "autostart install not implemented for this OS — copy this command \
-         into your XDG autostart (or equivalent):\n    {cli}"
-    );
+pub fn install(_args: &AutostartArgs) -> Result<Option<PathBuf>> {
+    // Linux / macOS: deliberately a no-op for v1. The about:catcast UI shows
+    // the operator a copy-pasteable autostart hint instead.
     Ok(None)
+}
+
+/// If a Startup-folder shortcut already exists, return its absolute path.
+#[cfg(target_os = "windows")]
+pub fn is_installed() -> Option<PathBuf> {
+    let p = startup_dir().ok()?.join("catstage.lnk");
+    if p.exists() {
+        Some(p)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn is_installed() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn startup_dir() -> Result<PathBuf> {
+    let appdata = std::env::var("APPDATA")?;
+    Ok(PathBuf::from(appdata).join("Microsoft\\Windows\\Start Menu\\Programs\\Startup"))
+}
+
+#[cfg(target_os = "windows")]
+fn shell_quote(s: &str) -> String {
+    // mslnk arguments are stored as a single string; wrap anything containing
+    // whitespace or quotes in double-quotes and escape embedded quotes.
+    if s.contains(' ') || s.contains('"') {
+        let escaped = s.replace('"', "\\\"");
+        format!("\"{escaped}\"")
+    } else {
+        s.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -75,19 +89,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn args_round_trip() {
+    fn args_struct_is_constructable() {
         let a = AutostartArgs {
             socks: "wss://x/r/y".into(),
             name: Some("kitchen".into()),
         };
-        assert_eq!(
-            a.to_cli_args(),
-            vec!["--socks", "wss://x/r/y", "--name", "kitchen"]
-        );
-        let a = AutostartArgs {
-            socks: "wss://x/r/y".into(),
+        assert!(a.socks.starts_with("wss://"));
+        assert_eq!(a.name.as_deref(), Some("kitchen"));
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn install_is_noop_on_non_windows() {
+        let r = install(&AutostartArgs {
+            socks: "wss://x".into(),
             name: None,
-        };
-        assert_eq!(a.to_cli_args(), vec!["--socks", "wss://x/r/y"]);
+        })
+        .unwrap();
+        assert!(r.is_none());
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn is_installed_is_none_on_non_windows() {
+        assert!(is_installed().is_none());
     }
 }

@@ -1,0 +1,8 @@
+[package]
+name = "cfb"
+version = "0.7.3"
+edition = "2021"
+description = "Local minimal stub of the `cfb` crate (Microsoft Compound File Binary). The upstream crate is blocked by our corporate proxy as a false positive; `infer` only uses the OLE-detection sniff, which this stub returns Err for. This means the stage's MIME detection never reports XLS/DOC/PPT — totally fine for a digital signage product."
+license = "MIT"
+
+[dependencies]
