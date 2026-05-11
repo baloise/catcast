@@ -31,7 +31,7 @@ impl AutostartArgs {
 }
 
 #[cfg(target_os = "windows")]
-pub fn install(args: &AutostartArgs) -> Result<PathBuf> {
+pub fn install(args: &AutostartArgs) -> Result<Option<PathBuf>> {
     use anyhow::Context;
     use mslnk::ShellLink;
 
@@ -54,11 +54,11 @@ pub fn install(args: &AutostartArgs) -> Result<PathBuf> {
     link.set_name(Some("CatCast Stage".into()));
     link.create_lnk(&lnk_path)
         .with_context(|| format!("writing {}", lnk_path.display()))?;
-    Ok(lnk_path)
+    Ok(Some(lnk_path))
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn install(args: &AutostartArgs) -> Result<PathBuf> {
+pub fn install(args: &AutostartArgs) -> Result<Option<PathBuf>> {
     let cli = std::iter::once("catstage".to_string())
         .chain(args.to_cli_args())
         .collect::<Vec<_>>()
@@ -67,9 +67,7 @@ pub fn install(args: &AutostartArgs) -> Result<PathBuf> {
         "autostart install not implemented for this OS — copy this command \
          into your XDG autostart (or equivalent):\n    {cli}"
     );
-    // Return a sentinel path so callers can still log "would have written"
-    // without us actually writing anything.
-    Ok(PathBuf::from("/dev/null"))
+    Ok(None)
 }
 
 #[cfg(test)]

@@ -54,11 +54,12 @@ fn main() -> Result<()> {
     let name = args.name.clone().unwrap_or_else(default_name);
 
     if args.install_autostart {
-        let installed = autostart::install(&autostart::AutostartArgs {
+        if let Some(path) = autostart::install(&autostart::AutostartArgs {
             socks: args.socks.clone(),
             name: args.name.clone(),
-        })?;
-        eprintln!("catstage: autostart installed at {}", installed.display());
+        })? {
+            eprintln!("catstage: autostart installed at {}", path.display());
+        }
         return Ok(());
     }
 
