@@ -96,6 +96,13 @@ fn main() -> Result<()> {
             about_scheme_response(ctx.app_handle(), req)
         })
         .setup(move |app| {
+            // Force fullscreen at runtime in addition to the config-time
+            // request. WSLg / Wayland in particular tend to ignore the
+            // config-time `fullscreen: true` because the compositor isn't
+            // ready when the window is created.
+            if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
+                let _ = window.set_fullscreen(true);
+            }
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = bootstrap(handle, stage_name, broker_url).await {

@@ -82,6 +82,7 @@
       .pill.paused { color: var(--warn); border-color: var(--warn); }
       .pill.playing { color: var(--ok); border-color: var(--ok); }
       .pill.manual { color: var(--accent); border-color: var(--accent); }
+      .pill.idle { color: var(--muted); border-color: var(--muted); }
       form.inline { display: flex; flex-direction: column; gap: 8px; }
       form.inline .field { display: flex; gap: 8px; align-items: center; }
       form.inline .field label { width: 80px; color: var(--muted); }
@@ -210,10 +211,18 @@
           else if (snap.connection === "down") dot.classList.add("down");
 
           const pill = document.getElementById("mode-pill");
-          pill.classList.remove("paused", "playing", "manual");
-          let mode = "playing", text = "Playing";
-          if (snap.state.manual) { mode = "manual"; text = "Manual"; }
-          else if (snap.state.paused) { mode = "paused"; text = "Paused"; }
+          pill.classList.remove("paused", "playing", "manual", "idle");
+          // Mode precedence: manual > idle (no config) > paused > playing.
+          let mode, text;
+          if (snap.state.manual) {
+            mode = "manual"; text = "Manual";
+          } else if (!snap.state.has_config || !snap.state.has_logic) {
+            mode = "idle"; text = "Idle (waiting for config)";
+          } else if (snap.state.paused) {
+            mode = "paused"; text = "Paused";
+          } else {
+            mode = "playing"; text = "Playing";
+          }
           pill.classList.add(mode);
           pill.textContent = text;
 
