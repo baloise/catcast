@@ -208,11 +208,19 @@ pub async fn cmd_nav(
 #[tauri::command]
 pub async fn cmd_open_dir(path: String, app: tauri::AppHandle) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
+    // "Open dir" semantics: regardless of whether the path is a real file,
+    // a not-yet-created file, or a directory, reveal the *directory*. The
+    // old code only stripped to the parent when `is_file()` returned true,
+    // which silently failed for files that don't exist yet (e.g. config.yaml
+    // before the operator has pushed any config).
     let target = PathBuf::from(&path);
-    let to_reveal = if target.is_file() {
-        target.parent().map(|p| p.to_path_buf()).unwrap_or(target)
+    let to_reveal = if target.is_dir() {
+        target.clone()
     } else {
         target
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."))
     };
     app.opener()
         .open_path(to_reveal.display().to_string(), None::<&str>)
@@ -297,6 +305,22 @@ pub async fn cmd_exit(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn cmd_log(level: String, msg: String) -> Result<(), String> {
     eprintln!("[js {level}] {msg}");
+    Ok(())
+}
+
+/// Toggle the WebKit / WebView2 inspector window. Bound to F12 on the about
+/// page so an operator can attach DevTools without restarting with --devtools.
+#[tauri::command]
+pub async fn cmd_toggle_devtools(window: tauri::Window) -> Result<(), String> {
+    let label = window.label().to_string();
+    let Some(w) = window.get_webview_window(&label) else {
+        return Err("no webview window".into());
+    };
+    if w.is_devtools_open() {
+        w.close_devtools();
+    } else {
+        w.open_devtools();
+    }
     Ok(())
 }
 

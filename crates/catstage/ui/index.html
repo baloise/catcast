@@ -263,6 +263,7 @@
         Shortcuts:
         <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>M</kbd> toggle manual ·
         <kbd>F11</kbd> toggle fullscreen ·
+        <kbd>F12</kbd> toggle devtools ·
         <kbd>Esc</kbd> exit manual
       </section>
     </div>
@@ -343,7 +344,8 @@
             path.textContent = f.path || "(unavailable)";
             const btn = document.createElement("button");
             btn.textContent = "Open dir";
-            btn.onclick = () => invoke("cmd_open_dir", { path: f.path });
+            btn.onclick = () => invoke("cmd_open_dir", { path: f.path })
+              .catch((e) => console.error("open_dir failed for", f.path, ":", e));
             row.append(check, label, path, btn);
             files.appendChild(row);
           });
@@ -361,7 +363,8 @@
             }).then(refresh).catch((e) => alert("Re-install failed: " + e));
             const opendir = document.createElement("button");
             opendir.textContent = "Open shortcut location";
-            opendir.onclick = () => invoke("cmd_open_dir", { path: snap.autostart_path });
+            opendir.onclick = () => invoke("cmd_open_dir", { path: snap.autostart_path })
+              .catch((e) => console.error("open_dir failed for", snap.autostart_path, ":", e));
             row.append(reinstall, opendir);
             auto.appendChild(row);
           } else {
@@ -468,6 +471,9 @@
           } else if (ev.key === "F11") {
             ev.preventDefault();
             invoke("cmd_toggle_fullscreen").catch((e) => console.error(e));
+          } else if (ev.key === "F12") {
+            ev.preventDefault();
+            invoke("cmd_toggle_devtools").catch((e) => console.error(e));
           } else if (ev.key === "Escape") {
             ev.preventDefault();
             invoke("cmd_hotkey_escape").catch((e) => console.error(e));

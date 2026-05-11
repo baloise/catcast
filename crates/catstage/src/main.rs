@@ -116,6 +116,7 @@ fn main() -> Result<()> {
             about::cmd_hotkey_escape,
             about::cmd_exit,
             about::cmd_log,
+            about::cmd_toggle_devtools,
         ])
         .setup(move |app| {
             // Force fullscreen at runtime in addition to the config-time
