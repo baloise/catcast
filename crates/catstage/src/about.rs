@@ -1,4 +1,4 @@
-//! about:catcast — the info-and-control page.
+//! catcast://about — the info-and-control page.
 //!
 //! Two pieces live here:
 //!   * `Snapshot` + `make_snapshot()` — the JSON blob the page renders.
@@ -216,7 +216,7 @@ pub async fn cmd_open_dir(path: String, app: tauri::AppHandle) -> Result<(), Str
         .map_err(to_string)
 }
 
-/// Internal command: the about:catcast JS keydown handler routes Ctrl+Alt+M
+/// Internal command: the catcast://about JS keydown handler routes Ctrl+Alt+M
 /// here so the Rust side owns the manual-mode toggle and the matching
 /// webview navigation.
 #[tauri::command]
@@ -250,7 +250,7 @@ pub async fn cmd_hotkey_toggle_manual(
     Ok(())
 }
 
-/// Internal command: Esc inside about:catcast leaves manual mode. Outside
+/// Internal command: Esc inside catcast://about leaves manual mode. Outside
 /// manual mode it's a no-op (kiosk Esc should not exit the app).
 #[tauri::command]
 pub async fn cmd_hotkey_escape(
@@ -297,7 +297,7 @@ fn build_plan(
     Ok(plan)
 }
 
-/// Render the about:catcast HTML with an initial JSON blob injected.
+/// Render the catcast://about HTML with an initial JSON blob injected.
 pub fn render_about_html(snapshot: &Snapshot) -> String {
     let asset = include_str!("../ui/about.html");
     let json = serde_json::to_string(snapshot).unwrap_or_else(|_| "{}".into());
@@ -314,7 +314,7 @@ pub fn render_about_html(snapshot: &Snapshot) -> String {
     }
 }
 
-/// Push the latest snapshot to the about:catcast page (via Tauri event).
+/// Push the latest snapshot to the catcast://about page (via Tauri event).
 /// Called from `SchedEvents` after state changes.
 pub fn emit_state(app: &tauri::AppHandle, label: &str) {
     let Some(ctx) = app.try_state::<TauriCtx>() else {

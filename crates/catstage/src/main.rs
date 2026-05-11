@@ -1,11 +1,11 @@
 //! catstage — CatCast fullscreen viewer.
 //!
 //! Tauri 2.x shell. Owns the fullscreen WebView2 window, hosts the
-//! `about:catcast` URI scheme, and runs the scheduler/socks/Rhai engine in
+//! `catcast://about` URI scheme, and runs the scheduler/socks/Rhai engine in
 //! the same tokio runtime Tauri starts.
 //!
 //! Window-focused hotkeys (Ctrl+Alt+M, F11, Esc) are caught by a JS keydown
-//! listener inside `about:catcast` and forwarded to Rust via `invoke` — chosen
+//! listener inside `catcast://about` and forwarded to Rust via `invoke` — chosen
 //! because Tauri 2 doesn't yet expose a stable Rust-side window key handler.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -42,7 +42,7 @@ struct Args {
     name: Option<String>,
 
     /// Drop a Startup-folder shortcut so this stage launches at login,
-    /// then exit. (The about:catcast wizard does the same thing
+    /// then exit. (The catcast://about wizard does the same thing
     /// interactively.)
     #[arg(long)]
     install_autostart: bool,
@@ -121,7 +121,7 @@ async fn bootstrap(app: tauri::AppHandle, name: String, broker_url: String) -> R
 
     if config_yaml.is_none() && logic_rhai.is_none() {
         eprintln!(
-            "catstage: no config/logic on disk — about:catcast splash with stage name '{name}'"
+            "catstage: no config/logic on disk — catcast://about splash with stage name '{name}'"
         );
     }
 

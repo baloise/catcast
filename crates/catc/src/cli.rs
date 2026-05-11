@@ -21,7 +21,7 @@ pub enum Cmd {
         #[arg(long)]
         socks: String,
     },
-    /// Register a stage by name (read it off the stage's about:catcast page).
+    /// Register a stage by name (read it off the stage's catcast://about page).
     AddStage {
         name: String,
     },

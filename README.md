@@ -31,7 +31,7 @@ catstage.exe --install-autostart --socks wss://.../r/<room> --name kitchen
 
 # 3. On your laptop
 catc init --socks wss://.../r/<room>
-catc add-stage kitchen        # the name shows on the stage's about:catcast page
+catc add-stage kitchen        # the name shows on the stage's catcast://about page
 catc config import config.yaml --name kitchen
 catc nav https://example.com --for 5m
 ```

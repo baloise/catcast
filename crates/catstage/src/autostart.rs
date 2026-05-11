@@ -5,7 +5,7 @@
 //! arguments the wizard collected. No admin rights required.
 //!
 //! On non-Windows targets the function is a no-op that returns a friendly
-//! message — the about:catcast UI surfaces it to the operator.
+//! message — the catcast://about UI surfaces it to the operator.
 
 use std::path::PathBuf;
 
@@ -45,7 +45,7 @@ pub fn install(args: &AutostartArgs) -> Result<Option<PathBuf>> {
 
 #[cfg(not(target_os = "windows"))]
 pub fn install(_args: &AutostartArgs) -> Result<Option<PathBuf>> {
-    // Linux / macOS: deliberately a no-op for v1. The about:catcast UI shows
+    // Linux / macOS: deliberately a no-op for v1. The catcast://about UI shows
     // the operator a copy-pasteable autostart hint instead.
     Ok(None)
 }

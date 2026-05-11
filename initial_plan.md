@@ -28,13 +28,13 @@ the corp network.
   `{ v, nonce, ct }`. The stage name lives inside the ciphertext as the
   routing field. So the broker, and any random URL-scraper, see only opaque
   blobs. To learn a stage's name an attacker needs **physical access to the
-  stage screen** (the `about:catcast` page displays the name) — at which
+  stage screen** (the `catcast://about` page displays the name) — at which
   point they own the device by other means anyway.
 - **Operator setup flow** (matches the way the CLI already needs a config
   file for the broker URL):
     1. Deploy CatSocks. Get a URL: `wss://catsocks.<acct>.workers.dev/r/<room>`.
     2. On each stage machine: run `catstage --install-autostart --socks <URL>
-       [--name <name>]` once. Stage boots, shows its name on `about:catcast`.
+       [--name <name>]` once. Stage boots, shows its name on `catcast://about`.
     3. On the laptop: `catc init --socks <URL>` writes `catc.toml`. Then
        `catc add-stage <name>` for each stage (operator reads the name off
        the screen). The CLI now caches an Argon2id-derived key per stage.
@@ -158,7 +158,7 @@ There is **no broker-level enumeration**. The CLI only ever interacts with
 stages it has been told about explicitly:
 
 - `catc add-stage <name>` registers a stage in the local CLI config (operator
-  typically reads the name off the stage's `about:catcast` page).
+  typically reads the name off the stage's `catcast://about` page).
 - `catc targets list` prints the stages from `catc.toml`.
 - `catc targets list --probe` sends a `GetState` to each configured stage
   and reports who replied within a few seconds.
@@ -173,12 +173,12 @@ even if someone scrapes the URL.
 - Tauri 2.x window: `decorations: false`, `fullscreen: true`, `always_on_top:
   true`, `skip_taskbar: true`. WebView2 hosts a tiny bundled `ui/index.html`.
 - The HTML shell is a minimal frame: it shows either (a) the
-  `about:catcast` info page (see below) when no config is loaded, (b) full
+  `catcast://about` info page (see below) when no config is loaded, (b) full
   navigation of the webview to the configured URL for content, or (c) a
   manual-mode overlay with chrome.
-- **`about:catcast`** is registered as a custom Tauri URI scheme handler
+- **`catcast://about`** is registered as a custom Tauri URI scheme handler
   (`tauri.conf.json` → `protocol`). Navigating to it (either as the no-config
-  splash, via `catc nav about:catcast`, or by typing it in the manual-mode URL
+  splash, via `catc nav catcast://about`, or by typing it in the manual-mode URL
   bar) renders a Rust-served HTML page showing: stage name, version, broker
   URL, connection state, manual on/off, config + logic presence, current
   rotation entry, last-error. Easy to extend later (logs link, "force
@@ -235,7 +235,7 @@ work freely on the rest of the floor without `--name` plumbing.
 ```
 catc init --socks <URL>                  # write catc.toml; idempotent
 catc add-stage <name>                    # register a stage by its name
-                                         #   (read off the stage's about:catcast)
+                                         #   (read off the stage's catcast://about)
 catc remove-stage <name>
 catc activate   <name>... | --all        # mark stages active
 catc deactivate <name>... | --all        # mark stages inactive
@@ -386,10 +386,10 @@ Local end-to-end on a Windows 11 box:
    `ws://localhost:8787/r/default` (wrangler invokes `worker-build` to compile
    the Rust crate to WASM).
 2. `cargo run -p catstage -- --socks ws://localhost:8787/r/default --name kitchen`
-   → fullscreen window shows the `about:catcast` page with the name "kitchen".
+   → fullscreen window shows the `catcast://about` page with the name "kitchen".
 3. `cargo run -p catc -- init --socks ws://localhost:8787/r/default` then
    `cargo run -p catc -- add-stage kitchen` (operator reads "kitchen" off the
-   stage's about:catcast page in step 2).
+   stage's catcast://about page in step 2).
 4. `cargo run -p catc -- targets list --probe` → reports `kitchen: up`.
 5. `cargo run -p catc -- logic import default-logic/default.rhai --name kitchen`
    `cargo run -p catc -- config import examples/config.yaml --name kitchen`
@@ -397,7 +397,7 @@ Local end-to-end on a Windows 11 box:
 6. `catc nav https://example.com --for 1m --name kitchen` → interrupts rotation;
    resumes after 1 minute.
 7. `catc manual on --name kitchen` → manual overlay appears with URL bar.
-   Type `about:catcast` in the URL bar → info page renders with stage
+   Type `catcast://about` in the URL bar → info page renders with stage
    metadata. Press Ctrl+Alt+M on the stage → toggles back to rotation.
    Verify cookies persist after logging into a test SSO page and toggling to
    manual again.

@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>about:catcast</title>
+    <title>catcast://about</title>
     <style>
       :root {
         color-scheme: dark;
@@ -321,7 +321,7 @@
           if (ev.key === "Enter") go();
         });
 
-        // Window-focused hotkeys (the about:catcast page IS manual mode, so
+        // Window-focused hotkeys (the catcast://about page IS manual mode, so
         // catching keys here is sufficient — see plan).
         document.addEventListener("keydown", (ev) => {
           if (ev.ctrlKey && ev.altKey && (ev.key === "m" || ev.key === "M")) {

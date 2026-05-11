@@ -25,7 +25,7 @@ pub type InboundHandler = Arc<dyn Fn(Plaintext) + Send + Sync>;
 enum Disconnect {
     /// The outbound sender was dropped — propagate a clean shutdown.
     Shutdown,
-    /// The operator (via about:catcast) asked us to drop and re-establish.
+    /// The operator (via catcast://about) asked us to drop and re-establish.
     /// Skip backoff and try again straight away.
     Forced,
     /// Real connection error. Apply backoff and retry.
