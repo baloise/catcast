@@ -1,5 +1,14 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <!-- Created with Inkscape (http://www.inkscape.org/) -->
+<!--
+  CROSS-REF — the CatCast logo also lives in:
+    * crates/catstage/icons/icon.png          (256x256 raster; regenerate
+        with: convert -background none -density 600 -resize 256x256
+        CastCast_logo_plain.svg crates/catstage/icons/icon.png)
+    * crates/catstage/ui/about.html           (inlined SVG inside <header>;
+        keep the paths in sync when you change the artwork)
+  When editing this file, update the copies above.
+-->
 
 <svg
    width="800"
