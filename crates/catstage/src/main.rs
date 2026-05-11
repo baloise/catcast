@@ -64,6 +64,22 @@ pub(crate) struct Shared {
 }
 
 fn main() -> Result<()> {
+    // Force X11 over Wayland on Linux. WebKitGTK's Wayland path doesn't
+    // honour set_fullscreen() reliably on WSLg / Weston — the window opens
+    // in a small default size and `Toggle Fullscreen` / F11 only seem to
+    // act once. Under X11 (XWayland under WSLg) fullscreen works correctly.
+    // No-op on Windows / macOS, where the binary doesn't read GDK_BACKEND.
+    //
+    // `set_var` is safe here: we're still single-threaded — Tauri's runtime
+    // hasn't been built, no background work has been spawned.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("GDK_BACKEND").is_none() {
+        // SAFETY: pre-runtime, single-threaded; no other thread is reading env.
+        unsafe {
+            std::env::set_var("GDK_BACKEND", "x11");
+        }
+    }
+
     let args = Args::parse();
     let name = args.name.clone().unwrap_or_else(default_name);
 
