@@ -91,17 +91,23 @@ fn main() -> Result<()> {
             about::cmd_open_dir,
             about::cmd_hotkey_toggle_manual,
             about::cmd_hotkey_escape,
+            about::cmd_exit,
         ])
-        .register_uri_scheme_protocol("catcast", |ctx, req| {
-            about_scheme_response(ctx.app_handle(), req)
-        })
         .setup(move |app| {
             // Force fullscreen at runtime in addition to the config-time
             // request. WSLg / Wayland in particular tend to ignore the
             // config-time `fullscreen: true` because the compositor isn't
             // ready when the window is created.
+            //
+            // Also capture the initial URL (the bundled index.html, served by
+            // Tauri at `tauri://localhost/` on Linux or `http://tauri.localhost/`
+            // on Windows) so hotkey commands can navigate back to it later
+            // without hard-coding a platform-specific URL.
             if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
                 let _ = window.set_fullscreen(true);
+                if let Ok(url) = window.url() {
+                    app.manage(about::AboutUrl(url));
+                }
             }
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -219,44 +225,6 @@ async fn bootstrap(app: tauri::AppHandle, name: String, broker_url: String) -> R
 fn default_name() -> String {
     let raw = gethostname::gethostname();
     raw.to_string_lossy().to_string()
-}
-
-/// `catcast://about` URI scheme response. The `about:` scheme can't be used
-/// directly — it's reserved by WebView2 / WebKitGTK, which intercept it
-/// before our handler ever sees the request. So we expose the same page
-/// under the custom `catcast://` scheme. Only `catcast://about` resolves;
-/// every other path under `catcast://` 404s.
-fn about_scheme_response(
-    app: &tauri::AppHandle,
-    request: tauri::http::Request<Vec<u8>>,
-) -> tauri::http::Response<Vec<u8>> {
-    let uri = request.uri().to_string();
-    if !uri.contains("about") {
-        return tauri::http::Response::builder()
-            .status(404)
-            .header("Content-Type", "text/plain")
-            .body(b"catcast: route not found".to_vec())
-            .unwrap();
-    }
-    let html = if let Some(ctx) = app.try_state::<TauriCtx>() {
-        about::render_about_html(&about::make_snapshot(&ctx))
-    } else {
-        // setup() hasn't finished managing TauriCtx yet — serve the page with
-        // a placeholder blob; the JS bootstraps itself via get_snapshot once
-        // TauriCtx exists.
-        about::render_about_html(&about::Snapshot {
-            state: State::fresh("(loading)", env!("CARGO_PKG_VERSION")),
-            broker_url: String::new(),
-            stage_name: "(loading)".into(),
-            files: Vec::new(),
-            autostart_path: None,
-        })
-    };
-    tauri::http::Response::builder()
-        .status(200)
-        .header("Content-Type", "text/html; charset=utf-8")
-        .body(html.into_bytes())
-        .unwrap()
 }
 
 struct SchedEvents {

@@ -1,12 +1,9 @@
 //! catcast://about — the info-and-control page.
 //!
-//! Two pieces live here:
-//!   * `Snapshot` + `make_snapshot()` — the JSON blob the page renders.
-//!   * `#[tauri::command]` handlers wired to the existing scheduler / socks /
-//!     window APIs in `crate::scheduler`, `crate::socks`, `crate::persist`.
-//!
-//! The custom URI scheme handler (`Builder::register_uri_scheme_protocol`)
-//! lives in `main.rs` so it has direct access to the embedded HTML asset.
+//! Serves as `index.html` of the bundled frontend (so Tauri auto-injects
+//! `window.__TAURI__` and the IPC bridge works). The JS in `ui/index.html`
+//! invokes `get_snapshot` to populate itself on first paint, then listens for
+//! `catcast://state` events for live updates.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -17,6 +14,12 @@ use catcast_proto::Message;
 use serde::Serialize;
 use tauri::{Emitter, Manager};
 use tokio::sync::{mpsc, Notify};
+
+/// The URL the window loaded on first paint — captured in `main.rs`'s setup
+/// callback and used by hotkey commands to navigate the kiosk back to the
+/// about page from a rotation URL. Platform-specific: typically
+/// `tauri://localhost/` on Linux/macOS or `http://tauri.localhost/` on Windows.
+pub struct AboutUrl(pub tauri::Url);
 
 use crate::logic::{self, LogicHandle, Plan};
 use crate::scheduler;
@@ -223,6 +226,7 @@ pub async fn cmd_open_dir(path: String, app: tauri::AppHandle) -> Result<(), Str
 pub async fn cmd_hotkey_toggle_manual(
     window: tauri::Window,
     ctx: tauri::State<'_, TauriCtx>,
+    about: tauri::State<'_, AboutUrl>,
 ) -> Result<(), String> {
     let (now_manual, target_url) = {
         let s = ctx.shared.lock().expect("Shared poisoned");
@@ -233,15 +237,13 @@ pub async fn cmd_hotkey_toggle_manual(
         .send(scheduler::Cmd::Manual(next))
         .await
         .map_err(to_string)?;
+    let label = window.label().to_string();
     if next {
-        let url = tauri::Url::parse("catcast://about").map_err(to_string)?;
-        let label = window.label().to_string();
         if let Some(w) = window.get_webview_window(&label) {
-            w.navigate(url).map_err(to_string)?;
+            w.navigate(about.0.clone()).map_err(to_string)?;
         }
     } else if let Some(url) = target_url {
         if let Ok(parsed) = tauri::Url::parse(&url) {
-            let label = window.label().to_string();
             if let Some(w) = window.get_webview_window(&label) {
                 let _ = w.navigate(parsed);
             }
@@ -250,7 +252,7 @@ pub async fn cmd_hotkey_toggle_manual(
     Ok(())
 }
 
-/// Internal command: Esc inside catcast://about leaves manual mode. Outside
+/// Internal command: Esc inside the about page leaves manual mode. Outside
 /// manual mode it's a no-op (kiosk Esc should not exit the app).
 #[tauri::command]
 pub async fn cmd_hotkey_escape(
@@ -279,6 +281,15 @@ pub async fn cmd_hotkey_escape(
     Ok(())
 }
 
+/// Quit the catstage process. Surfaced as an `[Exit]` button on the about
+/// page for operators who need to bail out without dropping to the OS
+/// (since the kiosk window has no decorations and no taskbar).
+#[tauri::command]
+pub async fn cmd_exit(app: tauri::AppHandle) -> Result<(), String> {
+    app.exit(0);
+    Ok(())
+}
+
 fn to_string<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
@@ -297,25 +308,8 @@ fn build_plan(
     Ok(plan)
 }
 
-/// Render the catcast://about HTML with an initial JSON blob injected.
-pub fn render_about_html(snapshot: &Snapshot) -> String {
-    let asset = include_str!("../ui/about.html");
-    let json = serde_json::to_string(snapshot).unwrap_or_else(|_| "{}".into());
-    let inject = format!("<script>window.__CATCAST__ = {json};</script>");
-    if let Some(idx) = asset.find("<body>") {
-        let split = idx + "<body>".len();
-        let mut out = String::with_capacity(asset.len() + inject.len());
-        out.push_str(&asset[..split]);
-        out.push_str(&inject);
-        out.push_str(&asset[split..]);
-        out
-    } else {
-        format!("{inject}{asset}")
-    }
-}
-
-/// Push the latest snapshot to the catcast://about page (via Tauri event).
-/// Called from `SchedEvents` after state changes.
+/// Push the latest snapshot to the about page (via Tauri event). Called from
+/// `SchedEvents` after state changes.
 pub fn emit_state(app: &tauri::AppHandle, label: &str) {
     let Some(ctx) = app.try_state::<TauriCtx>() else {
         return;
@@ -327,21 +321,6 @@ pub fn emit_state(app: &tauri::AppHandle, label: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn render_injects_initial_blob() {
-        let snap = Snapshot {
-            state: State::fresh("kitchen", "0.0.1"),
-            broker_url: "wss://broker/r/test".into(),
-            stage_name: "kitchen".into(),
-            files: Vec::new(),
-            autostart_path: None,
-        };
-        let html = render_about_html(&snap);
-        assert!(html.contains("window.__CATCAST__"));
-        assert!(html.contains("kitchen"));
-        assert!(html.contains("wss://broker/r/test"));
-    }
 
     #[test]
     fn file_entries_include_all_four() {
