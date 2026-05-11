@@ -46,6 +46,12 @@ struct Args {
     /// interactively.)
     #[arg(long)]
     install_autostart: bool,
+
+    /// Open WebKit/WebView2 DevTools alongside the kiosk window. Opt-in
+    /// for development; not bound to debug builds so a release binary
+    /// can also be inspected when needed.
+    #[arg(long)]
+    devtools: bool,
 }
 
 /// Everything the dispatch path mutates. Held behind one mutex so the socks
@@ -75,6 +81,7 @@ fn main() -> Result<()> {
 
     let broker_url = args.socks.clone();
     let stage_name = name.clone();
+    let open_devtools = args.devtools;
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -92,6 +99,7 @@ fn main() -> Result<()> {
             about::cmd_hotkey_toggle_manual,
             about::cmd_hotkey_escape,
             about::cmd_exit,
+            about::cmd_log,
         ])
         .setup(move |app| {
             // Force fullscreen at runtime in addition to the config-time
@@ -108,15 +116,57 @@ fn main() -> Result<()> {
                 if let Ok(url) = window.url() {
                     app.manage(about::AboutUrl(url));
                 }
-                // Auto-open DevTools in debug builds so JS errors / failed
-                // invokes are visible. Release builds stay closed; the
-                // [Exit] button is the only operator-facing escape hatch.
-                #[cfg(debug_assertions)]
-                window.open_devtools();
+                // Opt-in: only open DevTools when --devtools was passed.
+                // Auto-opening on every run was intrusive for normal use.
+                if open_devtools {
+                    window.open_devtools();
+                }
             }
+
+            // Manage TauriCtx synchronously so invoke('get_snapshot') from
+            // the about page's first paint sees managed state. The scheduler
+            // and socks tasks are still spawned asynchronously below — but
+            // we hand them their channel half-ends so the tx halves are in
+            // TauriCtx from the very start.
+            let (sched_tx, sched_rx) = tokio::sync::mpsc::channel(32);
+            let shared = std::sync::Arc::new(std::sync::Mutex::new(Shared {
+                state: State::fresh(&stage_name, env!("CARGO_PKG_VERSION")),
+                config_yaml: None,
+                logic_rhai: None,
+            }));
+            let logic_handle: std::sync::Arc<std::sync::Mutex<Option<LogicHandle>>> =
+                std::sync::Arc::new(std::sync::Mutex::new(None));
+            let out_tx: std::sync::Arc<
+                std::sync::Mutex<Option<tokio::sync::mpsc::Sender<Message>>>,
+            > = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let socks_abort = std::sync::Arc::new(tokio::sync::Notify::new());
+
+            app.manage(TauriCtx {
+                shared: std::sync::Arc::clone(&shared),
+                broker_url: broker_url.clone(),
+                sched_tx: sched_tx.clone(),
+                logic_handle: std::sync::Arc::clone(&logic_handle),
+                out_tx: std::sync::Arc::clone(&out_tx),
+                stage_name: stage_name.clone(),
+                socks_abort: std::sync::Arc::clone(&socks_abort),
+            });
+
             let handle = app.handle().clone();
+            let bootstrap_name = stage_name.clone();
+            let bootstrap_url = broker_url.clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = bootstrap(handle, stage_name, broker_url).await {
+                if let Err(e) = bootstrap(
+                    handle,
+                    bootstrap_name,
+                    bootstrap_url,
+                    shared,
+                    logic_handle,
+                    out_tx,
+                    socks_abort,
+                    sched_rx,
+                )
+                .await
+                {
                     eprintln!("catstage: bootstrap failed: {e:#}");
                 }
             });
@@ -126,16 +176,32 @@ fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("tauri runtime: {e}"))
 }
 
-/// Wire up scheduler + socks once Tauri's runtime is alive. Mirrors the old
-/// `run()` function but pushes scheduler events through Tauri instead of
-/// blocking on ctrl-c at the end.
-async fn bootstrap(app: tauri::AppHandle, name: String, broker_url: String) -> Result<()> {
-    let initial_state = match persist::load_state()? {
-        Some(s) => s,
-        None => State::fresh(&name, env!("CARGO_PKG_VERSION")),
-    };
+/// Wire up scheduler + socks once Tauri's runtime is alive. State containers
+/// and the scheduler receiver are created synchronously in `setup()` and
+/// passed in, so `TauriCtx` is already managed and commands invoked from the
+/// about page's first paint succeed.
+#[allow(clippy::too_many_arguments)]
+async fn bootstrap(
+    app: tauri::AppHandle,
+    name: String,
+    _broker_url: String,
+    shared: Arc<Mutex<Shared>>,
+    logic_handle: Arc<Mutex<Option<LogicHandle>>>,
+    out_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<Message>>>>,
+    socks_abort: Arc<tokio::sync::Notify>,
+    sched_rx: tokio::sync::mpsc::Receiver<scheduler::Cmd>,
+) -> Result<()> {
+    // Hydrate Shared from disk now that we're in an async context.
+    if let Some(s) = persist::load_state()? {
+        shared.lock().unwrap().state = s;
+    }
     let config_yaml = persist::load_config_yaml()?;
     let logic_rhai = persist::load_logic_rhai()?;
+    {
+        let mut sh = shared.lock().unwrap();
+        sh.config_yaml = config_yaml.clone();
+        sh.logic_rhai = logic_rhai.clone();
+    }
 
     if config_yaml.is_none() && logic_rhai.is_none() {
         eprintln!(
@@ -143,15 +209,8 @@ async fn bootstrap(app: tauri::AppHandle, name: String, broker_url: String) -> R
         );
     }
 
-    let shared = Arc::new(Mutex::new(Shared {
-        state: initial_state,
-        config_yaml: config_yaml.clone(),
-        logic_rhai: logic_rhai.clone(),
-    }));
-
     let key = Arc::new(Key::from_psk(&name).context("deriving AEAD key from stage name")?);
 
-    let logic_handle: Arc<Mutex<Option<LogicHandle>>> = Arc::new(Mutex::new(None));
     let initial_plan = match (&config_yaml, &logic_rhai) {
         (Some(yaml), Some(rhai)) => match build_plan(yaml, rhai, &logic_handle) {
             Ok(p) => {
@@ -168,29 +227,35 @@ async fn bootstrap(app: tauri::AppHandle, name: String, broker_url: String) -> R
         _ => Plan::default(),
     };
 
-    let out_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<Message>>>> = Arc::new(Mutex::new(None));
-
     let events = Arc::new(SchedEvents {
         app: app.clone(),
         shared: Arc::clone(&shared),
         out: Arc::clone(&out_tx),
     });
 
-    let sched_tx = scheduler::spawn(
+    scheduler::spawn_with_rx(
+        sched_rx,
         initial_plan,
         Some(Arc::clone(&logic_handle)),
         events.clone(),
     );
 
+    // sched_tx already lives in TauriCtx (managed synchronously in setup);
+    // clone it for the socks inbound dispatch closure.
+    let sched_tx_for_dispatch = app
+        .state::<crate::about::TauriCtx>()
+        .inner()
+        .sched_tx
+        .clone();
+
     let handler_shared = Arc::clone(&shared);
-    let handler_sched = sched_tx.clone();
     let handler_logic = Arc::clone(&logic_handle);
     let handler_out = Arc::clone(&out_tx);
     let handler_app = app.clone();
     let handler: socks::InboundHandler = Arc::new(move |pt| {
         let pt_msg = pt.msg.clone();
         let shared = Arc::clone(&handler_shared);
-        let sched = handler_sched.clone();
+        let sched = sched_tx_for_dispatch.clone();
         let logic = Arc::clone(&handler_logic);
         let out = Arc::clone(&handler_out);
         let app = handler_app.clone();
@@ -199,9 +264,13 @@ async fn bootstrap(app: tauri::AppHandle, name: String, broker_url: String) -> R
         });
     });
 
-    let socks_abort = Arc::new(tokio::sync::Notify::new());
+    let broker_url = app
+        .state::<crate::about::TauriCtx>()
+        .inner()
+        .broker_url
+        .clone();
     let outbound = socks::spawn(
-        broker_url.clone(),
+        broker_url,
         name.clone(),
         Arc::clone(&key),
         handler,
@@ -211,18 +280,6 @@ async fn bootstrap(app: tauri::AppHandle, name: String, broker_url: String) -> R
 
     let snapshot = shared.lock().unwrap().state.clone();
     let _ = outbound.send(Message::State(snapshot)).await;
-
-    // Register the Tauri context so commands and the URI scheme handler can
-    // reach the scheduler / shared state.
-    app.manage(TauriCtx {
-        shared: Arc::clone(&shared),
-        broker_url,
-        sched_tx,
-        logic_handle,
-        out_tx,
-        stage_name: name,
-        socks_abort,
-    });
 
     Ok(())
 }

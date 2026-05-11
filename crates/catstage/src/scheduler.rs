@@ -62,14 +62,31 @@ impl Events for NoopEvents {
 }
 
 /// Spawn the scheduler task. Returns the command sender; drop it to stop.
+/// Kept as a convenience for tests / future single-step callers; the binary
+/// uses [`spawn_with_rx`] so the tx half can be in `app.manage()`-d state
+/// before the rx half is consumed.
+#[allow(dead_code)]
 pub fn spawn(
     plan: Plan,
     logic: Option<Arc<Mutex<Option<LogicHandle>>>>,
     events: Arc<dyn Events>,
 ) -> mpsc::Sender<Cmd> {
     let (tx, rx) = mpsc::channel(32);
-    tokio::spawn(run(rx, plan, logic, events));
+    spawn_with_rx(rx, plan, logic, events);
     tx
+}
+
+/// Same as [`spawn`] but uses an externally-owned receiver. Used by main()
+/// so it can hand the matching sender to Tauri's managed state before the
+/// scheduler is wired up — otherwise the about page may invoke commands
+/// before `app.manage()` has been called.
+pub fn spawn_with_rx(
+    rx: mpsc::Receiver<Cmd>,
+    plan: Plan,
+    logic: Option<Arc<Mutex<Option<LogicHandle>>>>,
+    events: Arc<dyn Events>,
+) {
+    tokio::spawn(run(rx, plan, logic, events));
 }
 
 /// Internal state held by the scheduler task.

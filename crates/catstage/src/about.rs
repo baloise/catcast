@@ -290,6 +290,16 @@ pub async fn cmd_exit(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// JS console-forwarding sink. The about page wraps `console.log/warn/error`
+/// to invoke this command in addition to writing to the in-webview console,
+/// so we can grep catstage's stderr for JS issues without attaching DevTools.
+/// Levels: "log" | "info" | "warn" | "error" | "debug".
+#[tauri::command]
+pub async fn cmd_log(level: String, msg: String) -> Result<(), String> {
+    eprintln!("[js {level}] {msg}");
+    Ok(())
+}
+
 fn to_string<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }

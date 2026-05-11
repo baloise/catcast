@@ -3,6 +3,64 @@
   <head>
     <meta charset="utf-8" />
     <title>catcast://about</title>
+    <!--
+      Console + error forwarding shim. Wraps console.log/info/warn/error/debug
+      to also invoke cmd_log on the Rust side, and captures uncaught errors
+      and unhandled promise rejections. Runs before any other script so it
+      catches load-time errors. Failures swallow silently — DevTools still
+      shows everything regardless.
+    -->
+    <script>
+      (function () {
+        const safeInvoke = (cmd, args) => {
+          try {
+            const t = window.__TAURI__ || {};
+            const inv = (t.core && t.core.invoke) || t.invoke;
+            if (typeof inv === "function") {
+              const r = inv(cmd, args);
+              if (r && typeof r.catch === "function") r.catch(() => {});
+            }
+          } catch (_) {}
+        };
+        const fmt = (a) => {
+          if (a instanceof Error) return a.stack || a.message;
+          if (a && typeof a === "object") {
+            try { return JSON.stringify(a); } catch (_) { return String(a); }
+          }
+          return String(a);
+        };
+        ["log", "info", "warn", "error", "debug"].forEach((level) => {
+          const orig = console[level].bind(console);
+          console[level] = (...args) => {
+            orig(...args);
+            try {
+              safeInvoke("cmd_log", { level, msg: args.map(fmt).join(" ") });
+            } catch (_) {}
+          };
+        });
+        window.addEventListener("error", (e) => {
+          console.error(
+            "uncaught:",
+            e.message,
+            "at",
+            (e.filename || "?") + ":" + (e.lineno || 0) + ":" + (e.colno || 0),
+          );
+        });
+        window.addEventListener("unhandledrejection", (e) => {
+          console.error("unhandled rejection:", fmt(e.reason));
+        });
+        // One-shot bridge probe so we know whether window.__TAURI__ is even
+        // there. Logged async so the bridge has a tick to attach.
+        setTimeout(() => {
+          const t = window.__TAURI__;
+          if (!t) {
+            console.error("window.__TAURI__ is missing — IPC bridge not injected");
+          } else {
+            console.log("bridge ready, keys:", Object.keys(t).join(","));
+          }
+        }, 0);
+      })();
+    </script>
     <style>
       :root {
         color-scheme: dark;
