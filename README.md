@@ -14,7 +14,10 @@ state survives reboots and broker outages.
 
 ## Status
 
-Early. v1 targets Windows x64 only. macOS / Linux / ARM may follow.
+Early. v1 targets Windows x64 only — macOS / Linux / ARM distribution
+may follow. Auto-update is **not** in v1 (corp proxies block executable
+downloads in our test environment); updating a stage is a manual EXE
+swap. WSL/Linux is the recommended dev path.
 
 ## Quick start
 

@@ -44,9 +44,16 @@ tag — GitHub Actions builds and publishes `catstage.exe` and `catc.exe` from
 `ubuntu-latest` and `windows-latest` in parallel so you'll catch
 platform-specific breakage before it lands.
 
-When `catstage` gains its Tauri/WebView2 shell, Linux dev will additionally
-need the WebKitGTK toolchain (`libwebkit2gtk-4.1-dev`, `libsoup-3.0-dev`,
-and friends). Until then, plain `cargo` is enough.
+Linux dev needs the WebKitGTK toolchain so catstage's Tauri shell can
+build:
+
+```bash
+sudo apt install libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+    libjavascriptcoregtk-4.1-dev libxdo-dev
+```
+
+(Equivalents exist on Fedora / Arch — check the Tauri 2 prerequisites
+page if you're on a non-Debian distro.)
 
 The CF Worker (`crates/catsocks`) needs `wrangler` for deploy and
 `worker-build` for compilation; both are dev-only.
