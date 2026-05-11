@@ -11,7 +11,7 @@
       {
         "label": "stage",
         "title": "CatCast",
-        "url": "about:catcast",
+        "url": "catcast://about",
         "fullscreen": true,
         "decorations": false,
         "alwaysOnTop": true,

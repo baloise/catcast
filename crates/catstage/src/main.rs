@@ -92,7 +92,7 @@ fn main() -> Result<()> {
             about::cmd_hotkey_toggle_manual,
             about::cmd_hotkey_escape,
         ])
-        .register_uri_scheme_protocol("about", |ctx, req| {
+        .register_uri_scheme_protocol("catcast", |ctx, req| {
             about_scheme_response(ctx.app_handle(), req)
         })
         .setup(move |app| {
@@ -214,19 +214,21 @@ fn default_name() -> String {
     raw.to_string_lossy().to_string()
 }
 
-/// `about:catcast` URI scheme response. Anything else under `about:` 404s.
+/// `catcast://about` URI scheme response. The `about:` scheme can't be used
+/// directly — it's reserved by WebView2 / WebKitGTK, which intercept it
+/// before our handler ever sees the request. So we expose the same page
+/// under the custom `catcast://` scheme. Only `catcast://about` resolves;
+/// every other path under `catcast://` 404s.
 fn about_scheme_response(
     app: &tauri::AppHandle,
     request: tauri::http::Request<Vec<u8>>,
 ) -> tauri::http::Response<Vec<u8>> {
     let uri = request.uri().to_string();
-    // Tauri normalises `about:catcast` to `about://catcast/...` depending on
-    // platform — match on the suffix instead of the full URI.
-    if !uri.contains("catcast") {
+    if !uri.contains("about") {
         return tauri::http::Response::builder()
             .status(404)
             .header("Content-Type", "text/plain")
-            .body(b"about: not found".to_vec())
+            .body(b"catcast: route not found".to_vec())
             .unwrap();
     }
     let html = if let Some(ctx) = app.try_state::<TauriCtx>() {

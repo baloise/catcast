@@ -234,7 +234,7 @@ pub async fn cmd_hotkey_toggle_manual(
         .await
         .map_err(to_string)?;
     if next {
-        let url = tauri::Url::parse("about:catcast").map_err(to_string)?;
+        let url = tauri::Url::parse("catcast://about").map_err(to_string)?;
         let label = window.label().to_string();
         if let Some(w) = window.get_webview_window(&label) {
             w.navigate(url).map_err(to_string)?;
