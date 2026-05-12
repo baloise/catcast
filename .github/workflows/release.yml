@@ -6,31 +6,55 @@ on:
   workflow_dispatch:
 
 jobs:
-  windows:
-    runs-on: windows-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            suffix: windows-x64
+            ext: .exe
+          - os: ubuntu-latest
+            suffix: linux-x64
+            ext: ""
+          - os: macos-latest
+            suffix: macos-arm64
+            ext: ""
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build EXEs
+      - if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            build-essential \
+            file
+      - name: Build binaries
         run: cargo build --release -p catstage -p catc
       - name: Stage artifacts
+        shell: bash
         run: |
-          mkdir dist
-          copy target\release\catstage.exe dist\
-          copy target\release\catc.exe     dist\
-        shell: cmd
+          mkdir -p dist
+          cp "target/release/catstage${{ matrix.ext }}" "dist/catstage-${{ matrix.suffix }}${{ matrix.ext }}"
+          cp "target/release/catc${{ matrix.ext }}"     "dist/catc-${{ matrix.suffix }}${{ matrix.ext }}"
       - uses: actions/upload-artifact@v4
         with:
-          name: catcast-windows-x64
+          name: catcast-${{ matrix.suffix }}
           path: dist/
       - name: Attach to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/catstage.exe
-            dist/catc.exe
+            dist/catstage-${{ matrix.suffix }}${{ matrix.ext }}
+            dist/catc-${{ matrix.suffix }}${{ matrix.ext }}
           generate_release_notes: true
