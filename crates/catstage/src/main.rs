@@ -30,45 +30,68 @@ use crate::logic::{LogicHandle, Plan};
 
 const WINDOW_LABEL: &str = "stage";
 
-/// Installed on every navigation via `WebviewWindow::on_page_load(...)` so
-/// the kiosk's hotkeys (F1 / F11 / F12 / Ctrl+Alt+M / Esc) keep working even
-/// after the webview has navigated to an external rotation URL where the
-/// about page's own JS is no longer present. The about page's invoke bridge
-/// is window-scoped (per our capability file), so the IPC calls succeed
-/// regardless of which URL is loaded.
-const HOTKEY_SCRIPT: &str = r#"
-(function () {
+/// Build the hotkey-installer script for `WebviewWindow::on_page_load`.
+/// Tauri 2 doesn't inject `window.__TAURI__` on cross-origin pages, so we
+/// can't rely on `invoke()` from rotation URLs. The script tries IPC first;
+/// where that fails, it falls back to pure-JS equivalents:
+///
+/// * F1 / Ctrl+Alt+M / Esc → `window.location.href = ABOUT_URL` (back to
+///   the about page, where IPC works).
+/// * F11 → HTML5 Fullscreen API on the document element.
+/// * F12 → IPC-only; WebKit/WebView2's built-in F12 binding fills in on
+///   external pages.
+fn build_hotkey_script(about_url: &str) -> String {
+    // Escape just in case the URL ever contains characters that would break
+    // the JS string. Tauri::Url is well-formed but defence in depth.
+    let about_url = about_url.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(
+        r#"
+(function () {{
   if (window.__catcastHotkeysInstalled) return;
   window.__catcastHotkeysInstalled = true;
-  const inv = (cmd, args) => {
-    try {
-      const t = window.__TAURI__ || {};
-      const fn = (t.core && t.core.invoke) || t.invoke;
-      if (typeof fn === "function") {
+  const ABOUT_URL = "{about_url}";
+  const inv = (cmd, args) => {{
+    try {{
+      const t = window.__TAURI__;
+      const fn = t && ((t.core && t.core.invoke) || t.invoke);
+      if (typeof fn === "function") {{
         const r = fn(cmd, args);
-        if (r && typeof r.catch === "function") r.catch(() => {});
-      }
-    } catch (_) {}
-  };
-  document.addEventListener("keydown", (ev) => {
-    if (ev.key === "F1") {
+        if (r && typeof r.catch === "function") r.catch(() => {{}});
+        return true;
+      }}
+    }} catch (_) {{}}
+    return false;
+  }};
+  const backToAbout = () => {{ window.location.href = ABOUT_URL; }};
+  document.addEventListener("keydown", (ev) => {{
+    if (ev.key === "F1") {{
       ev.preventDefault();
-      inv("cmd_nav_about");
-    } else if (ev.key === "F11") {
+      if (!inv("cmd_nav_about")) backToAbout();
+    }} else if (ev.key === "F11") {{
       ev.preventDefault();
-      inv("cmd_toggle_fullscreen");
-    } else if (ev.key === "F12") {
+      if (!inv("cmd_toggle_fullscreen")) {{
+        // HTML5 Fullscreen fallback for cross-origin pages without IPC.
+        if (document.fullscreenElement) {{
+          if (document.exitFullscreen) document.exitFullscreen();
+        }} else if (document.documentElement.requestFullscreen) {{
+          document.documentElement.requestFullscreen();
+        }}
+      }}
+    }} else if (ev.key === "F12") {{
       ev.preventDefault();
       inv("cmd_toggle_devtools");
-    } else if (ev.ctrlKey && ev.altKey && (ev.key === "m" || ev.key === "M")) {
+    }} else if (ev.ctrlKey && ev.altKey && (ev.key === "m" || ev.key === "M")) {{
       ev.preventDefault();
-      inv("cmd_hotkey_toggle_manual");
-    } else if (ev.key === "Escape") {
-      inv("cmd_hotkey_escape");
-    }
-  }, true);
-})();
-"#;
+      if (!inv("cmd_hotkey_toggle_manual")) backToAbout();
+    }} else if (ev.key === "Escape") {{
+      if (!inv("cmd_hotkey_escape")) backToAbout();
+    }}
+  }}, true);
+  inv("cmd_log", {{ level: "log", msg: "hotkeys installed on " + window.location.href }});
+}})();
+"#
+    )
+}
 
 #[derive(Parser, Clone)]
 #[command(name = "catstage", version, about = "CatCast fullscreen viewer")]
@@ -144,8 +167,18 @@ fn main() -> Result<()> {
         // Re-install the hotkey handlers after every navigation so
         // F1/F11/F12/Ctrl+Alt+M/Esc keep working on rotation URLs — not
         // just on the about page where they were originally bound.
-        .on_page_load(|webview, _payload| {
-            let _ = webview.eval(HOTKEY_SCRIPT);
+        .on_page_load(|webview, payload| {
+            // Re-install hotkey handler after every navigation. Filter to
+            // Finished so the eval doesn't run while the previous page is
+            // still unloading.
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                let about_url = webview
+                    .app_handle()
+                    .try_state::<about::AboutUrl>()
+                    .map(|s| s.0.to_string())
+                    .unwrap_or_else(|| "tauri://localhost/".into());
+                let _ = webview.eval(build_hotkey_script(&about_url));
+            }
         })
         .invoke_handler(tauri::generate_handler![
             about::get_snapshot,
@@ -361,17 +394,24 @@ struct SchedEvents {
 
 impl scheduler::Events for SchedEvents {
     fn on_url_change(&self, url: &str) {
+        // State-equality only gates persist + broadcast (those should be
+        // idempotent and cheap to skip). The webview steer must run every
+        // time — otherwise a Nav-to-the-already-recorded-URL after a
+        // reboot would update nothing and the kiosk would stay on
+        // catcast://about even though current_url claims otherwise.
         let mut sh = self.shared.lock().unwrap();
-        if sh.state.current_url.as_deref() == Some(url) {
-            return;
+        let changed = sh.state.current_url.as_deref() != Some(url);
+        if changed {
+            sh.state.current_url = Some(url.to_string());
+            sh.state.since = chrono::Utc::now().timestamp_millis();
         }
-        sh.state.current_url = Some(url.to_string());
-        sh.state.since = chrono::Utc::now().timestamp_millis();
         let snap = sh.state.clone();
         drop(sh);
-        broadcast(&self.out, Message::State(snap));
-        if let Err(e) = persist::save_state(&self.shared.lock().unwrap().state) {
-            eprintln!("catstage: state save failed: {e:#}");
+        if changed {
+            broadcast(&self.out, Message::State(snap));
+            if let Err(e) = persist::save_state(&self.shared.lock().unwrap().state) {
+                eprintln!("catstage: state save failed: {e:#}");
+            }
         }
         steer_webview(&self.app, url);
         about::emit_state(&self.app, WINDOW_LABEL);
@@ -410,7 +450,9 @@ fn steer_webview(app: &tauri::AppHandle, url: &str) {
         return;
     }
     if let Ok(parsed) = tauri::Url::parse(url) {
-        let _ = window.navigate(parsed);
+        if let Err(e) = window.navigate(parsed) {
+            eprintln!("catstage: navigate({url}) failed: {e}");
+        }
     }
 }
 

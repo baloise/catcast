@@ -1,8 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability — allows the stage window to call every catcast command plus the bits of Tauri's core/window/webview APIs the about page touches.",
+  "description": "Default capability — allows the stage window to call every catcast command plus the bits of Tauri's core/window/webview APIs the about page touches. The `remote` block also extends those permissions to whatever rotation URL the kiosk is currently displaying, so the on_page_load-injected hotkey handlers (F1/F11/F12/Ctrl+Alt+M/Esc) can invoke from external pages too. Threat model: rotation URLs are operator-trusted intranet content; we tolerate that any displayed page can call our commands.",
   "windows": ["stage"],
+  "remote": {
+    "urls": ["https://**", "http://**"]
+  },
   "permissions": [
     "core:default",
     "core:window:default",
