@@ -22,6 +22,7 @@ use axum::{
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
@@ -100,8 +101,25 @@ async fn main() {
         .with_state(rooms);
 
     tracing::info!("catsocks-dev listening on ws://{}/r/<room>", args.bind);
-    let listener = tokio::net::TcpListener::bind(args.bind).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let listener = match tokio::net::TcpListener::bind(args.bind).await {
+        Ok(listener) => listener,
+        Err(err) if err.kind() == ErrorKind::AddrInUse => {
+            tracing::error!(
+                "bind failed: {} is already in use; stop the existing process or run with --bind <host:port>",
+                args.bind
+            );
+            std::process::exit(1);
+        }
+        Err(err) => {
+            tracing::error!("bind failed on {}: {}", args.bind, err);
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(err) = axum::serve(listener, app).await {
+        tracing::error!("server error: {}", err);
+        std::process::exit(1);
+    }
 }
 
 async fn ws_upgrade(
