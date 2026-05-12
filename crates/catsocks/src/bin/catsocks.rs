@@ -1,12 +1,13 @@
-//! `catsocks-dev` — local-dev replacement for the Cloudflare Worker broker.
+//! `catsocks` — native build of the CatCast WebSocket broker.
 //!
 //! Same wire shape as the production CF Worker (`/r/<room>` WebSocket
 //! upgrade, text frames broadcast to every other socket in the room),
 //! implemented natively with axum/tokio so the inner dev loop has no Node
-//! or wrangler dependency.
+//! or wrangler dependency. In-memory rooms, single process, plain TCP —
+//! intended for local dev, not for fronting real traffic.
 //!
 //! ```text
-//! cargo run -p catsocks --bin catsocks-dev
+//! cargo run -p catsocks
 //! # listens on ws://127.0.0.1:8787/r/<room>
 //! ```
 
@@ -29,7 +30,7 @@ use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
 
 #[derive(Parser)]
-#[command(name = "catsocks-dev", version, about = "Local CatCast broker (axum)")]
+#[command(name = "catsocks", version, about = "Native CatCast broker (axum)")]
 struct Args {
     /// Address to listen on. Defaults to 127.0.0.1:8787 to match `wrangler dev`.
     #[arg(long, default_value = "127.0.0.1:8787")]
@@ -100,7 +101,7 @@ async fn main() {
         .route("/r/{room}", get(ws_upgrade))
         .with_state(rooms);
 
-    tracing::info!("catsocks-dev listening on ws://{}/r/<room>", args.bind);
+    tracing::info!("catsocks listening on ws://{}/r/<room>", args.bind);
     let listener = match tokio::net::TcpListener::bind(args.bind).await {
         Ok(listener) => listener,
         Err(err) if err.kind() == ErrorKind::AddrInUse => {

@@ -13,13 +13,10 @@ crate-type = ["cdylib", "rlib"]
 #
 # - **WASM (production)**: `wasm32-unknown-unknown` + the Cloudflare `worker`
 #   crate. Deployed to Cloudflare Workers via `wrangler deploy`.
-# - **Native (local dev)**: `catsocks-dev` binary, a tiny axum/tokio relay
-#   with the same `/r/<room>` URL scheme. Lets the inner dev loop run
-#   without Node or wrangler installed.
-
-[[bin]]
-name = "catsocks-dev"
-path = "src/bin/dev.rs"
+# - **Native (local dev)**: `cargo run -p catsocks` builds the `catsocks`
+#   binary (src/bin/catsocks.rs), a tiny axum/tokio relay with the same
+#   `/r/<room>` URL scheme. Lets the inner dev loop run without Node or
+#   wrangler installed.
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 worker = { version = "0.8", features = ["http"] }

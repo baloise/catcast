@@ -57,14 +57,14 @@ page if you're on a non-Debian distro.)
 
 ### Running the whole stack locally
 
-Three components, three terminals. Use `catsocks-dev` (a tiny native
-broker, same wire shape as the Cloudflare Worker) so you don't need
-Node, wrangler, or a CF account just to iterate.
+Three components, three terminals. Run the native `catsocks` broker (a
+tiny axum/tokio relay with the same wire shape as the Cloudflare Worker)
+so you don't need Node, wrangler, or a CF account just to iterate.
 
 **Terminal 1 — the broker:**
 
 ```bash
-cargo run -p catsocks --bin catsocks-dev
+cargo run -p catsocks
 # listening on ws://127.0.0.1:8787/r/<room>
 ```
 
