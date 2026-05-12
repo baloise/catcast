@@ -1,13 +1,14 @@
 version: 1
 
 rotation:
-  default_duration: 30s
+  default_duration: 60s
   urls:
     # Short form — uses the default duration above.
-    - https://intranet.example.com/dashboard
+    - https://githubtracker.com/baloise/catcast
+    - https://gitcgr.com/baloise/catcast
     # Long form — overrides the duration for just this entry.
-    - url: https://intranet.example.com/news
-      duration: 60s
+    - url: https://api.star-history.com/chart?repos=baloise/catcast&type=date&legend=top-left
+      duration: 15s
 
 # Fixed-time entries override the rotation while they are active. The cron
 # expression is standard 5-field: `min hour day-of-month month day-of-week`.
@@ -15,5 +16,5 @@ rotation:
 # also accepted.
 fixed:
   - cron: "0 9 * * MON-FRI"
-    url: https://intranet.example.com/standup
-    duration: 30m
+    url: https://upload.wikimedia.org/wikipedia/commons/c/ca/Coffe.svg
+    duration: 10m
