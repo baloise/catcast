@@ -71,9 +71,7 @@ cargo run -p catsocks --bin catsocks-dev
 **Terminal 2 — a stage:**
 
 ```bash
-cargo run -p catstage -- \
-    --socks ws://127.0.0.1:8787/r/dev \
-    --name kitchen
+cargo run -p catstage -- --socks ws://127.0.0.1:8787/r/dev --name kitchen
 ```
 
 Tauri opens a fullscreen window pointed at `catcast://about` — that's
