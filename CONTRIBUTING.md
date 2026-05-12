@@ -13,6 +13,25 @@ fork, share, remix. No attribution required. No CLA. No DCO.
 - **Documentation patches** count. Typo fixes count. A good README
   example is worth a feature.
 
+## Commit style
+
+[Conventional Commits](https://www.conventionalcommits.org), loose form:
+
+    feat:     a user-visible feature
+    fix:      a bug fix
+    refactor: behaviour unchanged
+    docs:     prose / README / comments
+    chore:    deps, tooling, CI
+    test:     tests only
+    perf:     measurable performance win
+
+Append `!` (e.g. `feat!:`) or a `BREAKING CHANGE:` footer for anything
+that breaks the wire protocol, on-disk format, or CLI surface — that's
+how the maintainer knows to cut a `major`.
+
+We don't lint this. Best-effort is enough; the goal is readable release
+notes and an obvious bump level, not bureaucracy.
+
 ## What we'll merge
 
 Roughly in order of preference:
@@ -157,6 +176,36 @@ wrangler deploy   # publish
 Both `wrangler` and `worker-build` are dev-only — they're not in
 `Cargo.toml`. CI's `socks-deploy.yml` job invokes them on pushes to
 `main` that touch `crates/catsocks/**`.
+
+## Cutting a release
+
+Releases are tag-driven. Tag a commit `vX.Y.Z` on `main` and GitHub
+Actions builds + publishes binaries for Windows, Linux, and macOS-ARM
+(see [release.yml](.github/workflows/release.yml)). No crates.io step.
+
+The local flow uses [`cargo-release`](https://github.com/crate-ci/cargo-release)
+to bump all five crates in lockstep, commit, tag, and push:
+
+```bash
+cargo install cargo-release   # first time only
+
+# Dry-run: print what would happen, change nothing.
+cargo release patch
+
+# Guided: one confirm before each phase (commit, tag, push).
+cargo release patch -x
+
+# Autopilot.
+cargo release patch -x --no-confirm
+```
+
+Use `minor` / `major` instead of `patch` for non-patch bumps; `rc` /
+`beta` for pre-releases. cargo-release reads config from
+`[workspace.metadata.release]` in the root `Cargo.toml`.
+
+After the tag lands on origin, watch the **release** workflow in
+Actions — the GitHub Release appears once all three OS matrix jobs
+finish.
 
 ## Vibe
 
