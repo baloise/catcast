@@ -1,18 +1,20 @@
 //! Autostart installer.
 //!
-//! On Windows we drop a `.lnk` into the per-user Startup folder. The shortcut
-//! points at the running `catstage.exe` with the same `--socks` / `--name`
-//! arguments the wizard collected. No admin rights required.
+//! Windows  — `.lnk` in `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`.
+//! Linux    — `~/.config/autostart/catstage.desktop` (XDG; honoured by GNOME,
+//!            KDE, XFCE, LXQt and most other session managers).
+//! macOS    — currently a no-op (LaunchAgent support not implemented).
 //!
-//! On non-Windows targets the function is a no-op that returns a friendly
-//! message — the catcast://about UI surfaces it to the operator.
+//! All paths target the *per-user* autostart location; no admin / sudo
+//! required. The shortcut/file points at the running `catstage` binary with
+//! the same `--socks` / `--name` arguments the running process was launched
+//! with — `catc autostart install` populates those from the live `TauriCtx`.
 
 use std::path::PathBuf;
 
 use anyhow::Result;
 
 #[derive(Debug, Clone)]
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub struct AutostartArgs {
     /// `--socks <wss://...>` that the autostarted process should use.
     pub socks: String,
@@ -43,10 +45,32 @@ pub fn install(args: &AutostartArgs) -> Result<Option<PathBuf>> {
     Ok(Some(lnk_path))
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+pub fn install(args: &AutostartArgs) -> Result<Option<PathBuf>> {
+    use anyhow::Context;
+    let dir = linux_autostart_dir()?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let exe = std::env::current_exe().context("locating current executable")?;
+    let mut exec = format!(
+        "{} --socks {}",
+        exe.display(),
+        shell_quote_linux(&args.socks)
+    );
+    if let Some(name) = &args.name {
+        exec.push_str(&format!(" --name {}", shell_quote_linux(name)));
+    }
+    let path = dir.join("catstage.desktop");
+    let body = format!(
+        "[Desktop Entry]\nType=Application\nName=CatCast\nComment=CatCast digital signage viewer\nExec={exec}\nX-GNOME-Autostart-enabled=true\nTerminal=false\n"
+    );
+    std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
+    Ok(Some(path))
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
 pub fn install(_args: &AutostartArgs) -> Result<Option<PathBuf>> {
-    // Linux / macOS: deliberately a no-op for v1. The catcast://about UI shows
-    // the operator a copy-pasteable autostart hint instead.
+    // macOS / other Unix: not implemented for v1. The catcast://about UI
+    // surfaces this to the operator.
     Ok(None)
 }
 
@@ -61,7 +85,17 @@ pub fn is_installed() -> Option<PathBuf> {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+pub fn is_installed() -> Option<PathBuf> {
+    let p = linux_autostart_dir().ok()?.join("catstage.desktop");
+    if p.exists() {
+        Some(p)
+    } else {
+        None
+    }
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
 pub fn is_installed() -> Option<PathBuf> {
     None
 }
@@ -79,7 +113,18 @@ pub fn uninstall() -> Result<bool> {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+pub fn uninstall() -> Result<bool> {
+    let p = linux_autostart_dir()?.join("catstage.desktop");
+    if p.exists() {
+        std::fs::remove_file(&p)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
 pub fn uninstall() -> Result<bool> {
     Ok(false)
 }
@@ -102,6 +147,30 @@ fn shell_quote(s: &str) -> String {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn linux_autostart_dir() -> Result<PathBuf> {
+    use anyhow::Context;
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .context("neither XDG_CONFIG_HOME nor HOME is set")?;
+    Ok(base.join("autostart"))
+}
+
+#[cfg(target_os = "linux")]
+fn shell_quote_linux(s: &str) -> String {
+    // .desktop Exec lines use POSIX-like quoting. Wrap in single quotes and
+    // escape any embedded single quotes via '\''.
+    if s.is_empty()
+        || s.chars()
+            .any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '\\' | '$' | '`' | '*' | '?'))
+    {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    } else {
+        s.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,20 +185,62 @@ mod tests {
         assert_eq!(a.name.as_deref(), Some("kitchen"));
     }
 
+    // Linux install/uninstall round-trip under a sandboxed XDG_CONFIG_HOME so
+    // we don't touch the developer's real autostart dir.
     #[test]
-    #[cfg(not(target_os = "windows"))]
-    fn install_is_noop_on_non_windows() {
+    #[cfg(target_os = "linux")]
+    fn linux_install_uninstall_round_trip() {
+        use std::sync::Mutex;
+        // Env vars are process-global; keep this test serial against itself
+        // if more env-touching tests land.
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _g = LOCK.lock().unwrap();
+
+        let tmp = std::env::temp_dir().join(format!("catstage-autostart-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        // SAFETY: pre-call snapshot above; restored after the test.
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", &tmp);
+        }
+
+        assert!(is_installed().is_none(), "fresh dir should report none");
+        let path = install(&AutostartArgs {
+            socks: "wss://example/r/test".into(),
+            name: Some("kitchen".into()),
+        })
+        .unwrap()
+        .expect("Linux install should return Some(path)");
+        assert!(path.exists());
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("[Desktop Entry]"));
+        // No shell metachars in either value, so no surrounding quotes.
+        assert!(body.contains("--socks wss://example/r/test"));
+        assert!(body.contains("--name kitchen"));
+        assert_eq!(is_installed().as_deref(), Some(path.as_path()));
+
+        assert!(uninstall().unwrap());
+        assert!(!path.exists());
+        assert!(is_installed().is_none());
+
+        // SAFETY: restore prior env state.
+        unsafe {
+            match prev_xdg {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    #[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
+    fn install_is_noop_on_unsupported_os() {
         let r = install(&AutostartArgs {
             socks: "wss://x".into(),
             name: None,
         })
         .unwrap();
         assert!(r.is_none());
-    }
-
-    #[test]
-    #[cfg(not(target_os = "windows"))]
-    fn is_installed_is_none_on_non_windows() {
-        assert!(is_installed().is_none());
     }
 }
