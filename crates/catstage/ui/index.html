@@ -73,6 +73,10 @@
         --err: #f85149;
         --font: ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       }
+      @property --logo-grad-inner { syntax: "<color>"; initial-value: #0e1116; inherits: false; }
+      @property --logo-grad-outer { syntax: "<color>"; initial-value: #0e1116; inherits: false; }
+      @property --logo-border-color { syntax: "<color>"; initial-value: rgba(0,0,0,0); inherits: false; }
+      @property --logo-border-width { syntax: "<length>"; initial-value: 0px; inherits: false; }
       * { box-sizing: border-box; }
       html, body {
         margin: 0; padding: 0;
@@ -90,8 +94,17 @@
         flex: 0 0 auto;
         display: inline-flex; align-items: center; justify-content: center;
         width: 72px; height: 72px; padding: 8px;
-        background: radial-gradient(circle, #e2e2e2 0%, #000000 100%);
+        background: radial-gradient(circle, var(--logo-grad-inner) 0%, var(--logo-grad-outer) 100%);
+        border: var(--logo-border-width) solid var(--logo-border-color);
         border-radius: 50%;
+        transition:
+          --logo-grad-inner 20s ease-in-out,
+          --logo-grad-outer 20s ease-in-out,
+          --logo-border-color 20s ease-in-out,
+          --logo-border-width 20s ease-in-out;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        header .logo { transition: none; }
       }
       header .logo svg { width: 100%; height: 100%; display: block; }
       header h1 { margin: 0; font-size: 28px; font-weight: 600; }
@@ -144,7 +157,14 @@
               and re-sync both copies.
             -->
             <svg viewBox="0 0 211.66667 211.66666" xmlns="http://www.w3.org/2000/svg" role="img">
-              <g transform="translate(-1.39355,-47.033689)">
+              <defs>
+                <filter id="psy" x="-20%" y="-20%" width="140%" height="140%">
+                  <feTurbulence id="psy-turb" type="fractalNoise" baseFrequency="0.012" numOctaves="2" seed="3" result="psy-noise" />
+                  <feDisplacementMap id="psy-disp" in="SourceGraphic" in2="psy-noise" scale="0" result="psy-displaced" />
+                  <feGaussianBlur id="psy-blur" in="psy-displaced" stdDeviation="0" />
+                </filter>
+              </defs>
+              <g filter="url(#psy)" transform="translate(-1.39355,-47.033689)">
                 <g transform="matrix(1.3180318,0,0,1.3180318,-24.598704,24.76755)">
                   <path d="M 100.88,163.47 H 68.23 l -4.9,-23.91 26.91,22.99 8.44,-15.49 h 2.2 m 0,16.41 h 32.65 c 0,0 4.9,-23.91 4.9,-23.91 l -26.91,22.99 -8.44,-15.49 h -2.2" style="fill:#000073"/>
                 </g>
@@ -305,6 +325,186 @@
         // Being on the about page implies Idle — assert it so F1 from a
         // rotation URL pauses the scheduler too, not just navigates.
         invoke("enter_idle").catch((e) => console.error(e));
+      })();
+    </script>
+    <!--
+      Subtle psychedelic logo drift. Six independent tracks (two gradient
+      stops, border width+color, blur, displacement, turbulence frequency)
+      pick new targets on a slow random schedule. ~90% of picks stay in a
+      tight band; ~10% reach for dramatic endpoints (full black plate,
+      saturated orange ring, real melt). Transitions are 25–75s so the
+      arrival is always gradual — never noticeable in the moment.
+      Honors prefers-reduced-motion.
+    -->
+    <script>
+      (function () {
+        if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+
+        const logo = document.querySelector("header .logo");
+        const turbEl = document.getElementById("psy-turb");
+        const dispEl = document.getElementById("psy-disp");
+        const blurEl = document.getElementById("psy-blur");
+        if (!logo || !turbEl || !dispEl || !blurEl) return;
+
+        const rand = (a, b) => a + Math.random() * (b - a);
+        const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+        const smoothstep = (t) => t * t * (3 - 2 * t);
+
+        const orange = "244,139,1";
+        const blue = "88,166,255";
+
+        const css = {
+          gradInner: {
+            prop: "--logo-grad-inner", durSec: 20,
+            subtle: ["#e2e2e2", "#d0d0d0", "#ececec", "#dcc8a0", "#bcc8d8", "#a8a8a8", "#e8d8b0", "#806848", "#b0a090"],
+            extreme: ["#000000", "#ffffff", "#f9d97a", "#1a0d00", "#f48b01", "#3a1010"],
+          },
+          gradOuter: {
+            prop: "--logo-grad-outer", durSec: 20,
+            subtle: ["#000000", "#0c1428", "#1a0a04", "#0a0a0a", "#0e1116", "#0a1a18", "#1a0a1a", "#240800"],
+            extreme: ["#0b1020", "#3a1500", "#220033", "#000000", "#f48b01"],
+          },
+        };
+
+        const border = {
+          durSec: 20,
+          subtle: [
+            [0, "rgba(0,0,0,0)"],
+            [1, "rgba(" + orange + ",0.18)"],
+            [1, "rgba(" + orange + ",0.30)"],
+            [2, "rgba(" + orange + ",0.40)"],
+            [2, "rgba(" + orange + ",0.50)"],
+            [1, "rgba(" + blue + ",0.25)"],
+            [2, "rgba(" + blue + ",0.35)"],
+          ],
+          extreme: [
+            [3, "rgba(" + orange + ",0.70)"],
+            [3, "rgba(" + orange + ",0.90)"],
+            [3, "rgba(" + orange + ",1.0)"],
+            [3, "rgba(" + blue + ",0.65)"],
+          ],
+        };
+
+        function rebuildTransition() {
+          logo.style.transition =
+            "--logo-grad-inner " + css.gradInner.durSec + "s ease-in-out, " +
+            "--logo-grad-outer " + css.gradOuter.durSec + "s ease-in-out, " +
+            "--logo-border-color " + border.durSec + "s ease-in-out, " +
+            "--logo-border-width " + border.durSec + "s ease-in-out";
+        }
+        rebuildTransition();
+
+        const num = {
+          blur: {
+            current: 0, from: 0, target: 0, start: 0, duration: 1,
+            subtle: [0, 0, 0, 0, 0, 0.3, 0.5, 0.7, 0.9, 1.1],
+            extreme: [1.6, 2.2, 2.8, 3.5],
+            apply: (v) => blurEl.setAttribute("stdDeviation", v.toFixed(3)),
+          },
+          displace: {
+            current: 0, from: 0, target: 0, start: 0, duration: 1,
+            subtle: [0, 0, 0, 0, 0.6, 1.2, 1.8, 2.4],
+            extreme: [3.5, 4.5, 5.5, 7.0],
+            apply: (v) => dispEl.setAttribute("scale", v.toFixed(3)),
+          },
+          turbFreq: {
+            current: 0.012, from: 0.012, target: 0.012, start: 0, duration: 1,
+            subtle: [0.008, 0.012, 0.020, 0.030, 0.045],
+            extreme: [0.003, 0.060, 0.080, 0.100],
+            apply: (v) => turbEl.setAttribute("baseFrequency", v.toFixed(5)),
+          },
+        };
+
+        function tick(now) {
+          for (const k in num) {
+            const tr = num[k];
+            if (tr.start === 0) continue;
+            const t = Math.min(1, (now - tr.start) / tr.duration);
+            const e = smoothstep(t);
+            tr.current = tr.from + (tr.target - tr.from) * e;
+            tr.apply(tr.current);
+            if (t >= 1) tr.start = 0;
+          }
+          requestAnimationFrame(tick);
+        }
+        requestAnimationFrame(tick);
+
+        function setNum(name, target, durSec) {
+          const tr = num[name];
+          tr.from = tr.current;
+          tr.target = target;
+          tr.start = performance.now();
+          tr.duration = durSec * 1000;
+        }
+
+        function applyDistort() {
+          // One composite "distort" track that moves blur, displace, and
+          // turbulence together so they read as a single coherent melt event.
+          // 40% zero out (crisp recovery), 40% subtle, 20% extreme.
+          const roll = Math.random();
+          const mode = roll < 0.4 ? "zero" : (roll < 0.8 ? "subtle" : "extreme");
+          const durSec = mode === "extreme" ? rand(15, 28) : rand(8, 18);
+          for (const k of ["blur", "displace", "turbFreq"]) {
+            const tr = num[k];
+            const target = mode === "zero"
+              ? (k === "turbFreq" ? 0.012 : 0)
+              : pick(mode === "extreme" ? tr.extreme : tr.subtle);
+            setNum(k, target, durSec);
+          }
+        }
+
+        function applyTrack(name) {
+          if (name === "distort") return applyDistort();
+          const extreme = Math.random() < 0.2;
+          const durSec = extreme ? rand(15, 28) : rand(8, 18);
+          if (name === "gradInner" || name === "gradOuter") {
+            const t = css[name];
+            t.durSec = durSec;
+            rebuildTransition();
+            logo.style.setProperty(t.prop, pick(extreme ? t.extreme : t.subtle));
+          } else if (name === "border") {
+            const [w, c] = pick(extreme ? border.extreme : border.subtle);
+            border.durSec = durSec;
+            rebuildTransition();
+            logo.style.setProperty("--logo-border-width", w + "px");
+            logo.style.setProperty("--logo-border-color", c);
+          }
+        }
+
+        // Weighted pool: distort fires slightly less often than the others.
+        const pickPool = ["gradInner", "gradInner", "gradInner", "gradOuter", "gradOuter", "gradOuter", "border", "border", "border", "distort", "distort"];
+        function pickTracks(n) {
+          const picked = new Set();
+          while (picked.size < n) picked.add(pickPool[Math.floor(Math.random() * pickPool.length)]);
+          return [...picked];
+        }
+
+        function calmReset() {
+          const durSec = rand(18, 28);
+          css.gradInner.durSec = durSec;
+          css.gradOuter.durSec = durSec;
+          rebuildTransition();
+          logo.style.setProperty("--logo-grad-inner", "#0e1116");
+          logo.style.setProperty("--logo-grad-outer", "#0e1116");
+        }
+
+        function schedule() {
+          if (Math.random() < 0.06) {
+            calmReset();
+            setTimeout(schedule, rand(35000, 65000));
+            return;
+          }
+
+          const r = Math.random();
+          let count = 1;
+          if (r >= 0.5 && r < 0.85) count = 2;
+          else if (r >= 0.85) count = 3;
+
+          for (const name of pickTracks(count)) applyTrack(name);
+          setTimeout(schedule, rand(3500, 10000));
+        }
+
+        setTimeout(schedule, rand(2000, 5000));
       })();
     </script>
   </body>
