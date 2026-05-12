@@ -17,4 +17,4 @@ class_name = "Room"
 # how Cloudflare tracks DO migrations.
 [[migrations]]
 tag = "v1"
-new_classes = ["Room"]
+new_sqlite_classes = ["Room"]
