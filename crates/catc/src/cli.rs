@@ -89,6 +89,10 @@ pub enum Cmd {
         #[command(flatten)]
         targets: Targets,
     },
+    /// Navigate the kiosk back to its about page (equivalent to pressing F1
+    /// at the physical screen). The stage knows its own platform-specific
+    /// about URL, so this works the same on Linux and Windows.
+    About(Targets),
     /// Cleanly terminate the catstage process on the target stage(s).
     Shutdown(Targets),
 }
@@ -286,6 +290,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             let on = matches!(on_off, OnOff::On);
             cmd_send(targets, Message::DevTools { on }).await
         }
+        Cmd::About(t) => cmd_send(t, Message::NavAbout).await,
         Cmd::Shutdown(t) => cmd_send(t, Message::Shutdown).await,
     }
 }

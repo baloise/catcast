@@ -98,6 +98,12 @@ pub enum Message {
     GetState,
 
     // ─── CLI -> stage: physical-machine / window actions ─────────────────
+    /// Navigate the kiosk back to its bundled about page. The stage captures
+    /// its own `AboutUrl` at startup (platform-specific:
+    /// `tauri://localhost/` on Linux, `http://tauri.localhost/` on Windows),
+    /// so the CLI doesn't have to know which. Equivalent to pressing F1 at
+    /// the physical kiosk.
+    NavAbout,
     /// Install (or replace) the Startup-folder shortcut on the stage's OS.
     AutostartInstall,
     /// Remove the Startup-folder shortcut if present.

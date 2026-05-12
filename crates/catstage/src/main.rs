@@ -466,6 +466,24 @@ async fn dispatch(
             broadcast(&out, Message::State(snap));
             None
         }
+        Message::NavAbout => Some(
+            match (
+                app.get_webview_window(WINDOW_LABEL),
+                app.try_state::<about::AboutUrl>(),
+            ) {
+                (Some(w), Some(about_url)) => {
+                    let url = about_url.0.clone();
+                    // Bypass steer_webview's manual-mode gate: NavAbout is an
+                    // operator override that should work regardless of mode.
+                    match w.navigate(url.clone()) {
+                        Ok(()) => Ok(format!("navigated to {url}")),
+                        Err(e) => Err(format!("navigate failed: {e}")),
+                    }
+                }
+                (None, _) => Err("no kiosk window".into()),
+                (_, None) => Err("AboutUrl not captured yet".into()),
+            },
+        ),
         Message::AutostartInstall => Some(match app.try_state::<crate::about::TauriCtx>() {
             Some(ctx) => {
                 let socks = ctx.inner().broker_url.clone();
