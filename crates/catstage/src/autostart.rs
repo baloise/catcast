@@ -3,7 +3,8 @@
 //! Windows  — `.lnk` in `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`.
 //! Linux    — `~/.config/autostart/catstage.desktop` (XDG; honoured by GNOME,
 //!            KDE, XFCE, LXQt and most other session managers).
-//! macOS    — currently a no-op (LaunchAgent support not implemented).
+//! macOS    — `~/Library/LaunchAgents/ch.helvetia.catcast.catstage.plist`
+//!            (per-user LaunchAgent; launchd loads it at next login).
 //!
 //! All paths target the *per-user* autostart location; no admin / sudo
 //! required. The shortcut/file points at the running `catstage` binary with
@@ -15,10 +16,14 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 #[derive(Debug, Clone)]
-// macOS install() is a no-op and reads neither field, so without this
-// dead_code fires on darwin only.
+// On platforms with no autostart implementation, install() is a no-op and
+// reads neither field — without this, dead_code fires on those targets only.
 #[cfg_attr(
-    all(not(target_os = "windows"), not(target_os = "linux")),
+    all(
+        not(target_os = "windows"),
+        not(target_os = "linux"),
+        not(target_os = "macos")
+    ),
     allow(dead_code)
 )]
 pub struct AutostartArgs {
@@ -73,10 +78,61 @@ pub fn install(args: &AutostartArgs) -> Result<Option<PathBuf>> {
     Ok(Some(path))
 }
 
-#[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
+#[cfg(target_os = "macos")]
+pub fn install(args: &AutostartArgs) -> Result<Option<PathBuf>> {
+    use anyhow::Context;
+    let dir = macos_launch_agents_dir()?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let exe = std::env::current_exe().context("locating current executable")?;
+
+    let mut program_args = String::new();
+    program_args.push_str(&format!(
+        "        <string>{}</string>\n",
+        xml_escape(&exe.display().to_string())
+    ));
+    program_args.push_str("        <string>--socks</string>\n");
+    program_args.push_str(&format!(
+        "        <string>{}</string>\n",
+        xml_escape(&args.socks)
+    ));
+    if let Some(name) = &args.name {
+        program_args.push_str("        <string>--name</string>\n");
+        program_args.push_str(&format!("        <string>{}</string>\n", xml_escape(name)));
+    }
+
+    let body = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTD/PropertyList-1.0.dtd\">\n\
+         <plist version=\"1.0\">\n\
+         <dict>\n\
+         \x20   <key>Label</key>\n\
+         \x20   <string>{label}</string>\n\
+         \x20   <key>ProgramArguments</key>\n\
+         \x20   <array>\n\
+         {program_args}\
+         \x20   </array>\n\
+         \x20   <key>RunAtLoad</key>\n\
+         \x20   <true/>\n\
+         \x20   <key>KeepAlive</key>\n\
+         \x20   <false/>\n\
+         </dict>\n\
+         </plist>\n",
+        label = xml_escape(LAUNCH_AGENT_LABEL),
+    );
+
+    let path = dir.join(format!("{LAUNCH_AGENT_LABEL}.plist"));
+    std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
+    Ok(Some(path))
+}
+
+#[cfg(all(
+    not(target_os = "windows"),
+    not(target_os = "linux"),
+    not(target_os = "macos")
+))]
 pub fn install(_args: &AutostartArgs) -> Result<Option<PathBuf>> {
-    // macOS / other Unix: not implemented for v1. The catcast://about UI
-    // surfaces this to the operator.
+    // Other Unix: not implemented. The catcast://about UI surfaces this to
+    // the operator.
     Ok(None)
 }
 
@@ -101,7 +157,23 @@ pub fn is_installed() -> Option<PathBuf> {
     }
 }
 
-#[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
+#[cfg(target_os = "macos")]
+pub fn is_installed() -> Option<PathBuf> {
+    let p = macos_launch_agents_dir()
+        .ok()?
+        .join(format!("{LAUNCH_AGENT_LABEL}.plist"));
+    if p.exists() {
+        Some(p)
+    } else {
+        None
+    }
+}
+
+#[cfg(all(
+    not(target_os = "windows"),
+    not(target_os = "linux"),
+    not(target_os = "macos")
+))]
 pub fn is_installed() -> Option<PathBuf> {
     None
 }
@@ -130,7 +202,22 @@ pub fn uninstall() -> Result<bool> {
     }
 }
 
-#[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
+#[cfg(target_os = "macos")]
+pub fn uninstall() -> Result<bool> {
+    let p = macos_launch_agents_dir()?.join(format!("{LAUNCH_AGENT_LABEL}.plist"));
+    if p.exists() {
+        std::fs::remove_file(&p)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+#[cfg(all(
+    not(target_os = "windows"),
+    not(target_os = "linux"),
+    not(target_os = "macos")
+))]
 pub fn uninstall() -> Result<bool> {
     Ok(false)
 }
@@ -175,6 +262,32 @@ fn shell_quote_linux(s: &str) -> String {
     } else {
         s.to_string()
     }
+}
+
+#[cfg(target_os = "macos")]
+const LAUNCH_AGENT_LABEL: &str = "ch.helvetia.catcast.catstage";
+
+#[cfg(target_os = "macos")]
+fn macos_launch_agents_dir() -> Result<PathBuf> {
+    use anyhow::Context;
+    let home = std::env::var_os("HOME").context("HOME is not set")?;
+    Ok(PathBuf::from(home).join("Library/LaunchAgents"))
+}
+
+#[cfg(target_os = "macos")]
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -240,7 +353,11 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
+    #[cfg(all(
+        not(target_os = "windows"),
+        not(target_os = "linux"),
+        not(target_os = "macos")
+    ))]
     fn install_is_noop_on_unsupported_os() {
         let r = install(&AutostartArgs {
             socks: "wss://x".into(),
@@ -248,5 +365,61 @@ mod tests {
         })
         .unwrap();
         assert!(r.is_none());
+    }
+
+    // macOS install/uninstall round-trip under a sandboxed HOME so we don't
+    // touch the developer's real LaunchAgents dir.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_install_uninstall_round_trip() {
+        use std::sync::Mutex;
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _g = LOCK.lock().unwrap();
+
+        let tmp = std::env::temp_dir().join(format!("catstage-autostart-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let prev_home = std::env::var_os("HOME");
+        // SAFETY: pre-call snapshot above; restored after the test.
+        unsafe {
+            std::env::set_var("HOME", &tmp);
+        }
+
+        assert!(is_installed().is_none(), "fresh dir should report none");
+        let path = install(&AutostartArgs {
+            socks: "wss://example/r/test".into(),
+            name: Some("kitchen".into()),
+        })
+        .unwrap()
+        .expect("macOS install should return Some(path)");
+        assert!(path.exists());
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("<key>Label</key>"));
+        assert!(body.contains("<string>ch.helvetia.catcast.catstage</string>"));
+        assert!(body.contains("<string>--socks</string>"));
+        assert!(body.contains("<string>wss://example/r/test</string>"));
+        assert!(body.contains("<string>--name</string>"));
+        assert!(body.contains("<string>kitchen</string>"));
+        assert!(body.contains("<key>RunAtLoad</key>"));
+        assert_eq!(is_installed().as_deref(), Some(path.as_path()));
+
+        assert!(uninstall().unwrap());
+        assert!(!path.exists());
+        assert!(is_installed().is_none());
+
+        // SAFETY: restore prior env state.
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_xml_escape_handles_special_chars() {
+        assert_eq!(xml_escape("a&b<c>d\"e'f"), "a&amp;b&lt;c&gt;d&quot;e&apos;f");
+        assert_eq!(xml_escape("plain"), "plain");
     }
 }
