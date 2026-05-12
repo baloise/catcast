@@ -8,7 +8,7 @@ use std::fs;
 use std::time::Duration;
 
 #[derive(Parser)]
-#[command(name = "catc", version, about = "CatCast CLI")]
+#[command(name = "catc", version, about = "😼 CatCast CLI")]
 pub struct Cli {
     #[command(subcommand)]
     pub cmd: Cmd,
@@ -148,8 +148,9 @@ pub enum ConfigCmd {
 #[derive(Subcommand)]
 pub enum LogicCmd {
     /// Push a Rhai logic file to the target stage(s).
+    /// If <FILE> is omitted, the built-in default logic is used.
     Import {
-        file: String,
+        file: Option<String>,
         #[command(flatten)]
         targets: Targets,
     },
@@ -262,7 +263,14 @@ pub async fn run(cli: Cli) -> Result<()> {
         },
         Cmd::Logic { sub } => match sub {
             LogicCmd::Import { file, targets } => {
-                let rhai = fs::read_to_string(&file).with_context(|| format!("read {file}"))?;
+                const DEFAULT_LOGIC: &str =
+                    include_str!("../../../default-logic/default.rhai");
+                let rhai = match file {
+                    Some(path) => {
+                        fs::read_to_string(&path).with_context(|| format!("read {path}"))?
+                    }
+                    None => DEFAULT_LOGIC.to_owned(),
+                };
                 cmd_send(targets, Message::SetLogic { rhai }).await
             }
             LogicCmd::Export { targets } => cmd_export_one(targets, ExportKind::Logic, None).await,
@@ -374,14 +382,14 @@ fn resolve_targets(cfg: &CatcConfig, t: &Targets) -> Result<Vec<String>> {
     } else if !t.names.is_empty() {
         for n in &t.names {
             if cfg.stage(n).is_none() {
-                bail!("stage {n:?} not registered (run `catc add-stage {n}`)");
+                bail!("stage {n:?} not registered (run `catc stage add {n}`)");
             }
         }
         Ok(t.names.clone())
     } else {
         let active = cfg.active_names();
         if active.is_empty() {
-            bail!("no active stages — register some with `catc add-stage` or pass --name/--all");
+            bail!("no active stages — register some with `catc stage add` or pass --name/--all");
         }
         Ok(active)
     }
@@ -567,7 +575,7 @@ async fn cmd_export_one(t: Targets, kind: ExportKind, dir: Option<String>) -> Re
 async fn cmd_targets_list(probe: bool) -> Result<()> {
     let cfg = CatcConfig::load()?;
     if cfg.stages.is_empty() {
-        println!("(no stages registered — run `catc add-stage <name>`)");
+        println!("(no stages registered — run `catc stage add <name>`)");
         return Ok(());
     }
     if !probe {

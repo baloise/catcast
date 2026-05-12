@@ -1,7 +1,7 @@
 //! WebSocket plumbing for the CLI.
 //!
 //! The CLI opens one connection per command, blasts the encrypted command(s),
-//! optionally waits a few seconds for replies (e.g. `targets list --probe`),
+//! optionally waits a few seconds for replies (e.g. `stage list --probe`),
 //! then closes. There is no long-lived state on the broker side.
 
 use anyhow::{anyhow, Context, Result};

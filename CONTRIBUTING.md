@@ -87,11 +87,11 @@ cargo run -p catc -- init --socks ws://127.0.0.1:8787/r/dev
 
 # Register the stage by name (read the name off the about page in
 # terminal 2). The CLI derives an Argon2id key for this PSK.
-cargo run -p catc -- add-stage kitchen
+cargo run -p catc -- stage add kitchen
 
 # Round-trip a probe: catc sends an encrypted GetState, catstage
 # replies with State, catc decrypts and reports.
-cargo run -p catc -- targets list --probe
+cargo run -p catc -- stage list --probe
 #   up    active  kitchen
 
 # Push a default config + logic so the stage starts rotating.
@@ -118,8 +118,10 @@ cargo run -p catc -- shutdown
 
 The about page has a single client-side shortcut: **F1** brings the
 kiosk back to the admin page from any URL (pure JS `location.href` —
-works on rotation URLs where the Tauri IPC bridge isn't injected). All
-other operator actions are CLI commands that travel over the broker.
+works on rotation URLs where the Tauri IPC bridge isn't injected) and
+flips the stage to `Idle` so rotation doesn't yank the operator off
+again at the next slot. It's equivalent to `catc about`. All other
+operator actions are CLI commands that travel over the broker.
 
 `catc` discovers `catc.toml` (and its sibling `aliases.yaml`) by
 precedence: `$CATC_CONFIG` if set, else `./catc.toml` in the cwd if it
