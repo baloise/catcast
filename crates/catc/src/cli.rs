@@ -179,6 +179,9 @@ pub enum StateCmd {
         targets: Targets,
     },
     Export {
+        /// Directory to write `config.yaml` and `logic.rhai` into. Created
+        /// if it doesn't exist. Symmetric with `state import <dir>`.
+        dir: String,
         #[command(flatten)]
         targets: Targets,
     },
@@ -256,14 +259,16 @@ pub async fn run(cli: Cli) -> Result<()> {
 
         Cmd::Config { sub } => match sub {
             ConfigCmd::Import { file, targets } => cmd_config_import(file, targets).await,
-            ConfigCmd::Export { targets } => cmd_export_one(targets, ExportKind::Config).await,
+            ConfigCmd::Export { targets } => {
+                cmd_export_one(targets, ExportKind::Config, None).await
+            }
         },
         Cmd::Logic { sub } => match sub {
             LogicCmd::Import { file, targets } => {
                 let rhai = fs::read_to_string(&file).with_context(|| format!("read {file}"))?;
                 cmd_send(targets, Message::SetLogic { rhai }).await
             }
-            LogicCmd::Export { targets } => cmd_export_one(targets, ExportKind::Logic).await,
+            LogicCmd::Export { targets } => cmd_export_one(targets, ExportKind::Logic, None).await,
         },
         Cmd::State { sub } => match sub {
             StateCmd::Import { file, targets } => {
@@ -277,7 +282,9 @@ pub async fn run(cli: Cli) -> Result<()> {
                 )
                 .await
             }
-            StateCmd::Export { targets } => cmd_export_one(targets, ExportKind::State).await,
+            StateCmd::Export { dir, targets } => {
+                cmd_export_one(targets, ExportKind::State, Some(dir)).await
+            }
         },
 
         Cmd::Targets { sub } => match sub {
@@ -490,19 +497,77 @@ async fn cmd_config_import(file: String, t: Targets) -> Result<()> {
     cmd_send(t, Message::SetConfig { yaml }).await
 }
 
-async fn cmd_export_one(t: Targets, _kind: ExportKind) -> Result<()> {
-    // Export currently requires exactly one target. We'd request a State
-    // snapshot from that one stage and write the requested artifact.
-    // TODO(catstage): wire SetConfig/SetLogic readbacks. For v0.0.1 the
-    // GetState reply only carries metadata, not the full config/logic
-    // payload — extend State to include them, or add dedicated GetConfig
-    // / GetLogic messages.
+async fn cmd_export_one(t: Targets, kind: ExportKind, dir: Option<String>) -> Result<()> {
     let cfg = CatcConfig::load()?;
     let names = resolve_targets(&cfg, &t)?;
     if names.len() != 1 {
         bail!("export needs exactly one target (--name N)");
     }
-    bail!("export not implemented yet — see TODO in catc/src/cli.rs");
+    let name = names[0].clone();
+    let keys = keys_for(&names)?;
+    let key = keys.get(&name).expect("key just derived");
+
+    let requests: Vec<Message> = match kind {
+        ExportKind::Config => vec![Message::GetConfig],
+        ExportKind::Logic => vec![Message::GetLogic],
+        ExportKind::State => vec![Message::GetConfig, Message::GetLogic],
+    };
+
+    let mut br = Broker::connect(&cfg.socks).await?;
+    for req in &requests {
+        br.send(key, &name, req).await?;
+    }
+    let plaintexts = br.collect(&keys, Duration::from_secs(2)).await;
+    br.close().await;
+
+    let mut got_yaml: Option<Option<String>> = None;
+    let mut got_rhai: Option<Option<String>> = None;
+    for (_n, pt) in plaintexts {
+        match pt.msg {
+            Message::ConfigData { yaml } => got_yaml = Some(yaml),
+            Message::LogicData { rhai } => got_rhai = Some(rhai),
+            _ => {}
+        }
+    }
+
+    match kind {
+        ExportKind::Config => {
+            let yaml =
+                got_yaml.ok_or_else(|| anyhow!("{name}: no reply within 2s (stage offline?)"))?;
+            let y = yaml.ok_or_else(|| anyhow!("{name}: no config loaded"))?;
+            print!("{y}");
+            if !y.ends_with('\n') {
+                println!();
+            }
+        }
+        ExportKind::Logic => {
+            let rhai =
+                got_rhai.ok_or_else(|| anyhow!("{name}: no reply within 2s (stage offline?)"))?;
+            let r = rhai.ok_or_else(|| anyhow!("{name}: no logic loaded"))?;
+            print!("{r}");
+            if !r.ends_with('\n') {
+                println!();
+            }
+        }
+        ExportKind::State => {
+            let yaml = got_yaml
+                .ok_or_else(|| anyhow!("{name}: no config reply within 2s (stage offline?)"))?;
+            let rhai = got_rhai
+                .ok_or_else(|| anyhow!("{name}: no logic reply within 2s (stage offline?)"))?;
+            let y = yaml.ok_or_else(|| anyhow!("{name}: no config loaded"))?;
+            let r = rhai.ok_or_else(|| anyhow!("{name}: no logic loaded"))?;
+            let dir = dir.expect("State export always carries a dir");
+            let dir = std::path::Path::new(&dir);
+            fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+            let cfg_path = dir.join("config.yaml");
+            let rhai_path = dir.join("logic.rhai");
+            fs::write(&cfg_path, &y).with_context(|| format!("write {}", cfg_path.display()))?;
+            fs::write(&rhai_path, &r).with_context(|| format!("write {}", rhai_path.display()))?;
+            println!("wrote {}", cfg_path.display());
+            println!("wrote {}", rhai_path.display());
+        }
+    }
+    Ok(())
 }
 
 async fn cmd_targets_list(probe: bool) -> Result<()> {

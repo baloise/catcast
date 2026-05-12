@@ -105,6 +105,12 @@ pub enum Message {
         rhai: String,
     },
     GetState,
+    /// Ask the stage to return its currently-loaded config.yaml. The reply is
+    /// a `ConfigData` (mirroring `GetState`/`State`); no `Reply` is sent.
+    GetConfig,
+    /// Ask the stage to return its currently-loaded logic.rhai. Reply is a
+    /// `LogicData`; no `Reply` is sent.
+    GetLogic,
 
     // ─── CLI -> stage: physical-machine / window actions ─────────────────
     /// Navigate the kiosk back to its bundled about page. The stage captures
@@ -144,6 +150,16 @@ pub enum Message {
     Reply {
         ok: bool,
         message: String,
+    },
+    /// Reply to `GetConfig`. `yaml` is `None` when no config has been pushed
+    /// to the stage yet.
+    ConfigData {
+        yaml: Option<String>,
+    },
+    /// Reply to `GetLogic`. `rhai` is `None` when no logic has been pushed
+    /// to the stage yet.
+    LogicData {
+        rhai: Option<String>,
     },
 }
 

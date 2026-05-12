@@ -489,6 +489,16 @@ async fn dispatch(
             broadcast(&out, Message::State(snap));
             None
         }
+        Message::GetConfig => {
+            let yaml = shared.lock().unwrap().config_yaml.clone();
+            broadcast(&out, Message::ConfigData { yaml });
+            None
+        }
+        Message::GetLogic => {
+            let rhai = shared.lock().unwrap().logic_rhai.clone();
+            broadcast(&out, Message::LogicData { rhai });
+            None
+        }
         Message::NavAbout => Some(
             match (
                 app.get_webview_window(WINDOW_LABEL),
@@ -584,7 +594,10 @@ async fn dispatch(
             app.exit(0);
             None
         }
-        Message::State(_) | Message::Reply { .. } => None,
+        Message::State(_)
+        | Message::Reply { .. }
+        | Message::ConfigData { .. }
+        | Message::LogicData { .. } => None,
     };
 
     if let Some(res) = outcome {
