@@ -37,6 +37,7 @@ zeroize = "1"
 # async / ws
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.27", features = ["rustls-tls-webpki-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 futures-util = "0.3"
 
 # CLI

@@ -14,6 +14,9 @@ use clap::Parser;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("install rustls ring crypto provider");
     let cli = cli::Cli::parse();
     cli::run(cli).await
 }

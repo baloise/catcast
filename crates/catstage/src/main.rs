@@ -90,6 +90,10 @@ pub(crate) struct Shared {
 }
 
 fn main() -> Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("install rustls ring crypto provider");
+
     // Force X11 over Wayland on Linux. WebKitGTK's Wayland path doesn't
     // honour set_fullscreen() reliably on WSLg / Weston — the window opens
     // in a small default size and `Toggle Fullscreen` / F11 only seem to
