@@ -423,11 +423,11 @@ async fn dispatch(
     let outcome: Option<Result<String, String>> = match msg {
         Message::Pause => {
             let _ = sched.send(Cmd::Pause).await;
-            Some(Ok("paused".into()))
+            Some(Ok(decorate("paused", &shared)))
         }
         Message::Play => {
             let _ = sched.send(Cmd::Play).await;
-            Some(Ok("playing".into()))
+            Some(Ok(decorate("playing", &shared)))
         }
         Message::Nav { url } => {
             let m = format!("navigating to {url}");
@@ -446,10 +446,13 @@ async fn dispatch(
         }
         Message::Manual { on } => {
             let _ = sched.send(Cmd::Manual(on)).await;
+            // Manual-on parks the kiosk on the about page regardless of what's
+            // loaded, so don't decorate it. Manual-off resumes whatever the
+            // scheduler has — same context as play/pause.
             Some(Ok(if on {
                 "manual on".into()
             } else {
-                "manual off".into()
+                decorate("manual off", &shared)
             }))
         }
         Message::SetConfig { yaml } => {
@@ -535,6 +538,27 @@ async fn dispatch(
             Err(m) => (false, m),
         };
         broadcast(&out, Message::Reply { ok, message });
+    }
+}
+
+/// Append a load-state hint to a Pause/Play/Manual-off reply so the operator
+/// knows whether the scheduler actually has something to do. Without this,
+/// `catc play` against a fresh stage returns "playing" even though there's
+/// nothing on screen — true at the flag level, useless in practice.
+fn decorate(verb: &str, shared: &Arc<Mutex<Shared>>) -> String {
+    let sh = shared.lock().unwrap();
+    let hint = match (sh.state.has_config, sh.state.has_logic) {
+        (true, true) => sh.state.current_url.as_ref().map(|u| format!("on {u}")),
+        (false, false) => Some(
+            "no config or logic loaded — push them with `catc config import` / `catc logic import`"
+                .into(),
+        ),
+        (false, true) => Some("no config loaded — push one with `catc config import`".into()),
+        (true, false) => Some("no logic loaded — push one with `catc logic import`".into()),
+    };
+    match hint {
+        Some(h) => format!("{verb} — {h}"),
+        None => verb.into(),
     }
 }
 
