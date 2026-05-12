@@ -121,12 +121,19 @@ kiosk back to the admin page from any URL (pure JS `location.href` —
 works on rotation URLs where the Tauri IPC bridge isn't injected). All
 other operator actions are CLI commands that travel over the broker.
 
-If you want to keep your real `~/.config/catc/` untouched while
-hacking, point catc at a throwaway dir:
+`catc` discovers `catc.toml` (and its sibling `aliases.yaml`) by
+precedence: `$CATC_CONFIG` if set, else `./catc.toml` in the cwd if it
+exists, else the platform default (`~/.config/catc/` on Linux). To keep
+your real config untouched while hacking, use one of:
 
 ```bash
-HOME=$(mktemp -d) cargo run -p catc -- init --socks ws://127.0.0.1:8787/r/dev
-# …subsequent `catc` invocations need the same HOME override.
+# Throwaway file via env var:
+CATC_CONFIG=/tmp/catc-dev.toml cargo run -p catc -- init --socks ws://127.0.0.1:8787/r/dev
+# …keep CATC_CONFIG set (or `export` it) for subsequent invocations.
+
+# Or just drop a catc.toml in a scratch dir and cd into it:
+mkdir /tmp/catc-dev && cd /tmp/catc-dev && touch catc.toml
+cargo run -p catc -- init --socks ws://127.0.0.1:8787/r/dev
 ```
 
 To wipe an existing dev state on the stage side, delete

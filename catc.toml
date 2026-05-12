@@ -1,0 +1,5 @@
+socks = "ws://127.0.0.1:8787/r/dev"
+
+[[stages]]
+name = "kitchen"
+active = true
