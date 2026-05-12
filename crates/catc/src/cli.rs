@@ -44,8 +44,9 @@ pub enum Cmd {
         #[command(flatten)]
         targets: Targets,
     },
+    /// Set or toggle manual mode. Omit `on|off` to flip the current value.
     Manual {
-        on_off: OnOff,
+        on_off: Option<OnOff>,
         #[command(flatten)]
         targets: Targets,
     },
@@ -77,15 +78,17 @@ pub enum Cmd {
         #[command(subcommand)]
         sub: AutostartCmd,
     },
-    /// Toggle the kiosk window's fullscreen state.
+    /// Set or toggle the kiosk window's fullscreen state. Omit `on|off`
+    /// to flip the current value.
     Fullscreen {
-        on_off: OnOff,
+        on_off: Option<OnOff>,
         #[command(flatten)]
         targets: Targets,
     },
-    /// Open or close the WebKit / WebView2 inspector on the target stage(s).
+    /// Open, close, or toggle the WebKit / WebView2 inspector on the target
+    /// stage(s). Omit `on|off` to flip the current value.
     Devtools {
-        on_off: OnOff,
+        on_off: Option<OnOff>,
         #[command(flatten)]
         targets: Targets,
     },
@@ -236,8 +239,13 @@ pub async fn run(cli: Cli) -> Result<()> {
             None => cmd_send(targets, Message::Nav { url }).await,
         },
         Cmd::Manual { on_off, targets } => {
-            let on = matches!(on_off, OnOff::On);
-            cmd_send(targets, Message::Manual { on }).await
+            cmd_send(
+                targets,
+                Message::Manual {
+                    on: on_off.map(|v| matches!(v, OnOff::On)),
+                },
+            )
+            .await
         }
 
         Cmd::Config { sub } => match sub {
@@ -283,12 +291,22 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
         },
         Cmd::Fullscreen { on_off, targets } => {
-            let on = matches!(on_off, OnOff::On);
-            cmd_send(targets, Message::Fullscreen { on }).await
+            cmd_send(
+                targets,
+                Message::Fullscreen {
+                    on: on_off.map(|v| matches!(v, OnOff::On)),
+                },
+            )
+            .await
         }
         Cmd::Devtools { on_off, targets } => {
-            let on = matches!(on_off, OnOff::On);
-            cmd_send(targets, Message::DevTools { on }).await
+            cmd_send(
+                targets,
+                Message::DevTools {
+                    on: on_off.map(|v| matches!(v, OnOff::On)),
+                },
+            )
+            .await
         }
         Cmd::About(t) => cmd_send(t, Message::NavAbout).await,
         Cmd::Shutdown(t) => cmd_send(t, Message::Shutdown).await,

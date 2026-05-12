@@ -445,11 +445,13 @@ async fn dispatch(
             Some(Ok(m))
         }
         Message::Manual { on } => {
-            let _ = sched.send(Cmd::Manual(on)).await;
+            // None = toggle: read the current flag from Shared and flip it.
+            let new_on = on.unwrap_or_else(|| !shared.lock().unwrap().state.manual);
+            let _ = sched.send(Cmd::Manual(new_on)).await;
             // Manual-on parks the kiosk on the about page regardless of what's
             // loaded, so don't decorate it. Manual-off resumes whatever the
             // scheduler has — same context as play/pause.
-            Some(Ok(if on {
+            Some(Ok(if new_on {
                 "manual on".into()
             } else {
                 decorate("manual off", &shared)
@@ -508,19 +510,33 @@ async fn dispatch(
             Some(res)
         }
         Message::Fullscreen { on } => Some(match app.get_webview_window(WINDOW_LABEL) {
-            Some(w) => match w.set_fullscreen(on) {
-                Ok(()) => Ok(if on {
-                    "fullscreen on".into()
-                } else {
-                    "fullscreen off".into()
-                }),
-                Err(e) => Err(format!("set_fullscreen({on}) failed: {e}")),
-            },
+            Some(w) => {
+                // None = toggle: read the window's current state and flip it.
+                let resolved: Result<bool, String> = match on {
+                    Some(v) => Ok(v),
+                    None => w
+                        .is_fullscreen()
+                        .map(|cur| !cur)
+                        .map_err(|e| format!("is_fullscreen() failed: {e}")),
+                };
+                match resolved {
+                    Ok(new_on) => match w.set_fullscreen(new_on) {
+                        Ok(()) => Ok(if new_on {
+                            "fullscreen on".into()
+                        } else {
+                            "fullscreen off".into()
+                        }),
+                        Err(e) => Err(format!("set_fullscreen({new_on}) failed: {e}")),
+                    },
+                    Err(e) => Err(e),
+                }
+            }
             None => Err("no kiosk window".into()),
         }),
         Message::DevTools { on } => Some(match app.get_webview_window(WINDOW_LABEL) {
             Some(w) => {
-                if on {
+                let new_on = on.unwrap_or_else(|| !w.is_devtools_open());
+                if new_on {
                     w.open_devtools();
                     Ok("devtools on".into())
                 } else {

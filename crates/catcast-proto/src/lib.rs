@@ -86,8 +86,10 @@ pub enum Message {
         url: String,
         duration_secs: u64,
     },
+    /// Set or toggle manual mode. `on = Some(true|false)` is explicit;
+    /// `None` flips whatever the current value is on the stage side.
     Manual {
-        on: bool,
+        on: Option<bool>,
     },
     SetConfig {
         yaml: String,
@@ -108,13 +110,15 @@ pub enum Message {
     AutostartInstall,
     /// Remove the Startup-folder shortcut if present.
     AutostartUninstall,
-    /// Set the kiosk window's fullscreen state. true = enter, false = exit.
+    /// Set or toggle the kiosk window's fullscreen state. `Some(true)`
+    /// enters, `Some(false)` exits, `None` toggles the current state.
     Fullscreen {
-        on: bool,
+        on: Option<bool>,
     },
-    /// Open or close the WebKit/WebView2 inspector window.
+    /// Set or toggle the WebKit/WebView2 inspector. `Some(true)` opens,
+    /// `Some(false)` closes, `None` toggles.
     DevTools {
-        on: bool,
+        on: Option<bool>,
     },
     /// Cleanly terminate the catstage process.
     Shutdown,
