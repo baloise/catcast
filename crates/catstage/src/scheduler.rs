@@ -54,6 +54,7 @@ pub trait Events: Send + Sync + 'static {
 
 /// Minimal no-op events sink. Useful for tests; the real binary wires this
 /// to the persistence + broadcast paths in `main`.
+#[allow(dead_code)]
 pub struct NoopEvents;
 impl Events for NoopEvents {
     fn on_url_change(&self, _url: &str) {}
