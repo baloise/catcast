@@ -415,116 +415,178 @@ async fn dispatch(
     app: tauri::AppHandle,
 ) {
     use scheduler::Cmd;
-    match msg {
+
+    // Every command produces exactly one Reply back to the CLI so the operator
+    // sees success / failure instead of fire-and-forget silence. Variants that
+    // are themselves replies (State, Reply) or whose reply *is* the State
+    // broadcast (GetState) return None.
+    let outcome: Option<Result<String, String>> = match msg {
         Message::Pause => {
             let _ = sched.send(Cmd::Pause).await;
+            Some(Ok("paused".into()))
         }
         Message::Play => {
             let _ = sched.send(Cmd::Play).await;
+            Some(Ok("playing".into()))
         }
         Message::Nav { url } => {
+            let m = format!("navigating to {url}");
             let _ = sched.send(Cmd::Nav(url)).await;
+            Some(Ok(m))
         }
         Message::NavTimed { url, duration_secs } => {
+            let m = format!("navigating to {url} for {duration_secs}s");
             let _ = sched
                 .send(Cmd::TimedNav {
                     url,
                     secs: duration_secs,
                 })
                 .await;
+            Some(Ok(m))
         }
         Message::Manual { on } => {
             let _ = sched.send(Cmd::Manual(on)).await;
+            Some(Ok(if on {
+                "manual on".into()
+            } else {
+                "manual off".into()
+            }))
         }
-        Message::SetConfig { yaml } => match Config::from_yaml(&yaml) {
-            Ok(cfg) => {
-                match cfg.validate() {
-                    Ok(warnings) => {
-                        for w in &warnings {
-                            eprintln!("catstage: config warning: {}", w.0);
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("catstage: config validation error: {e}");
-                        return;
-                    }
-                }
-                if let Err(e) = persist::save_config_yaml(&yaml) {
-                    eprintln!("catstage: persist config failed: {e:#}");
-                }
-                {
-                    let mut sh = shared.lock().unwrap();
-                    sh.config_yaml = Some(yaml.clone());
-                    sh.state.has_config = true;
-                }
-                rebuild_and_send(&shared, &sched, &logic_handle).await;
-                about::emit_state(&app, WINDOW_LABEL);
-            }
-            Err(e) => eprintln!("catstage: bad config YAML: {e}"),
-        },
+        Message::SetConfig { yaml } => {
+            Some(set_config(yaml, &shared, &sched, &logic_handle, &app).await)
+        }
         Message::SetLogic { rhai } => {
-            if let Err(e) = persist::save_logic_rhai(&rhai) {
-                eprintln!("catstage: persist logic failed: {e:#}");
-            }
-            {
-                let mut sh = shared.lock().unwrap();
-                sh.logic_rhai = Some(rhai.clone());
-                sh.state.has_logic = true;
-            }
-            rebuild_and_send(&shared, &sched, &logic_handle).await;
-            about::emit_state(&app, WINDOW_LABEL);
+            Some(set_logic(rhai, &shared, &sched, &logic_handle, &app).await)
         }
         Message::GetState => {
             let snap = shared.lock().unwrap().state.clone();
             broadcast(&out, Message::State(snap));
+            None
         }
-        Message::AutostartInstall => {
-            let (socks, name) = match app.try_state::<crate::about::TauriCtx>() {
-                Some(ctx) => (
-                    ctx.inner().broker_url.clone(),
-                    Some(ctx.inner().stage_name.clone()),
-                ),
-                None => return,
-            };
-            match autostart::install(&autostart::AutostartArgs { socks, name }) {
-                Ok(Some(p)) => eprintln!("autostart: installed at {}", p.display()),
-                Ok(None) => eprintln!("autostart: no-op on this OS"),
-                Err(e) => eprintln!("autostart: install failed: {e:#}"),
+        Message::AutostartInstall => Some(match app.try_state::<crate::about::TauriCtx>() {
+            Some(ctx) => {
+                let socks = ctx.inner().broker_url.clone();
+                let name = Some(ctx.inner().stage_name.clone());
+                let res = match autostart::install(&autostart::AutostartArgs { socks, name }) {
+                    Ok(Some(p)) => Ok(format!("installed at {}", p.display())),
+                    Ok(None) => Ok("no-op on this OS".into()),
+                    Err(e) => Err(format!("install failed: {e:#}")),
+                };
+                about::emit_state(&app, WINDOW_LABEL);
+                res
             }
-            about::emit_state(&app, WINDOW_LABEL);
-        }
+            None => Err("internal: TauriCtx not initialised".into()),
+        }),
         Message::AutostartUninstall => {
-            match autostart::uninstall() {
-                Ok(true) => eprintln!("autostart: shortcut removed"),
-                Ok(false) => eprintln!("autostart: nothing to remove"),
-                Err(e) => eprintln!("autostart: uninstall failed: {e:#}"),
-            }
+            let res = match autostart::uninstall() {
+                Ok(true) => Ok("shortcut removed".into()),
+                Ok(false) => Ok("nothing to remove".into()),
+                Err(e) => Err(format!("uninstall failed: {e:#}")),
+            };
             about::emit_state(&app, WINDOW_LABEL);
+            Some(res)
         }
-        Message::Fullscreen { on } => {
-            if let Some(w) = app.get_webview_window(WINDOW_LABEL) {
-                if let Err(e) = w.set_fullscreen(on) {
-                    eprintln!("set_fullscreen({on}) failed: {e}");
-                }
-            }
-        }
-        Message::DevTools { on } => {
-            if let Some(w) = app.get_webview_window(WINDOW_LABEL) {
+        Message::Fullscreen { on } => Some(match app.get_webview_window(WINDOW_LABEL) {
+            Some(w) => match w.set_fullscreen(on) {
+                Ok(()) => Ok(if on {
+                    "fullscreen on".into()
+                } else {
+                    "fullscreen off".into()
+                }),
+                Err(e) => Err(format!("set_fullscreen({on}) failed: {e}")),
+            },
+            None => Err("no kiosk window".into()),
+        }),
+        Message::DevTools { on } => Some(match app.get_webview_window(WINDOW_LABEL) {
+            Some(w) => {
                 if on {
                     w.open_devtools();
+                    Ok("devtools on".into())
                 } else {
                     w.close_devtools();
+                    Ok("devtools off".into())
                 }
             }
-        }
+            None => Err("no kiosk window".into()),
+        }),
         Message::Shutdown => {
+            // Reply must reach the CLI before app.exit() tears down the socks
+            // task. Send it inline, give the outbound mpsc + websocket a
+            // moment to flush, then exit. The CLI uses a slightly larger
+            // timeout for Shutdown specifically; see cmd_send_many.
+            broadcast(
+                &out,
+                Message::Reply {
+                    ok: true,
+                    message: "shutting down".into(),
+                },
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             eprintln!("catstage: shutdown requested via broker");
             app.exit(0);
+            None
         }
-        Message::State(_) => {
-            // Other stages on the same room might also emit State — ignore.
-        }
+        Message::State(_) | Message::Reply { .. } => None,
+    };
+
+    if let Some(res) = outcome {
+        let (ok, message) = match res {
+            Ok(m) => (true, m),
+            Err(m) => (false, m),
+        };
+        broadcast(&out, Message::Reply { ok, message });
     }
+}
+
+async fn set_config(
+    yaml: String,
+    shared: &Arc<Mutex<Shared>>,
+    sched: &tokio::sync::mpsc::Sender<scheduler::Cmd>,
+    logic_handle: &Arc<Mutex<Option<LogicHandle>>>,
+    app: &tauri::AppHandle,
+) -> Result<String, String> {
+    let cfg = Config::from_yaml(&yaml).map_err(|e| format!("bad config YAML: {e}"))?;
+    let warnings = cfg
+        .validate()
+        .map_err(|e| format!("config validation error: {e}"))?;
+    for w in &warnings {
+        eprintln!("catstage: config warning: {}", w.0);
+    }
+    persist::save_config_yaml(&yaml).map_err(|e| format!("persist config failed: {e:#}"))?;
+    {
+        let mut sh = shared.lock().unwrap();
+        sh.config_yaml = Some(yaml);
+        sh.state.has_config = true;
+    }
+    rebuild_and_send(shared, sched, logic_handle).await;
+    about::emit_state(app, WINDOW_LABEL);
+    Ok(if warnings.is_empty() {
+        "config saved".into()
+    } else {
+        format!(
+            "config saved ({} warning{})",
+            warnings.len(),
+            if warnings.len() == 1 { "" } else { "s" }
+        )
+    })
+}
+
+async fn set_logic(
+    rhai: String,
+    shared: &Arc<Mutex<Shared>>,
+    sched: &tokio::sync::mpsc::Sender<scheduler::Cmd>,
+    logic_handle: &Arc<Mutex<Option<LogicHandle>>>,
+    app: &tauri::AppHandle,
+) -> Result<String, String> {
+    persist::save_logic_rhai(&rhai).map_err(|e| format!("persist logic failed: {e:#}"))?;
+    {
+        let mut sh = shared.lock().unwrap();
+        sh.logic_rhai = Some(rhai);
+        sh.state.has_logic = true;
+    }
+    rebuild_and_send(shared, sched, logic_handle).await;
+    about::emit_state(app, WINDOW_LABEL);
+    Ok("logic saved".into())
 }
 
 async fn rebuild_and_send(

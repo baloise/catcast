@@ -361,19 +361,87 @@ async fn cmd_send(t: Targets, msg: Message) -> Result<()> {
     cmd_send_many(t, vec![msg]).await
 }
 
+/// Send `msgs` to every resolved target and wait for one `Reply` per command
+/// per target. Prints `name: ok message` or `name: ERR message` and exits
+/// non-zero if any target was offline / unreachable / errored. `Shutdown` is
+/// the awkward case: the stage exits before its reply can hit the wire
+/// reliably, so we use a longer collect window for that variant only.
 async fn cmd_send_many(t: Targets, msgs: Vec<Message>) -> Result<()> {
+    use catcast_proto::Message::Reply;
+    use std::collections::HashMap;
+    use std::time::Duration;
+
     let cfg = CatcConfig::load()?;
     let names = resolve_targets(&cfg, &t)?;
     let keys = keys_for(&names)?;
+    let expected_per_target = msgs.len();
+    let needs_extra_grace = msgs.iter().any(|m| matches!(m, Message::Shutdown));
+    let collect_window = if needs_extra_grace {
+        Duration::from_secs(3)
+    } else {
+        Duration::from_secs(2)
+    };
+
     let mut br = Broker::connect(&cfg.socks).await?;
     for name in &names {
         let key = keys.get(name).expect("key just derived");
         for m in &msgs {
             br.send(key, name, m).await?;
         }
-        println!("-> {name}: {}", msgs.len());
     }
+
+    let plaintexts = br.collect(&keys, collect_window).await;
     br.close().await;
+
+    // Group replies by target name (multiple commands → multiple replies in
+    // send order; the broker preserves FIFO per sender).
+    let mut by_target: HashMap<String, Vec<(bool, String)>> = HashMap::new();
+    for (name, pt) in plaintexts {
+        if let Reply { ok, message } = pt.msg {
+            by_target.entry(name).or_default().push((ok, message));
+        }
+    }
+
+    let mut all_ok = true;
+    for name in &names {
+        let replies = by_target.remove(name).unwrap_or_default();
+        if replies.is_empty() {
+            println!(
+                "{name}: no reply within {}s (stage offline?)",
+                collect_window.as_secs()
+            );
+            all_ok = false;
+            continue;
+        }
+        if replies.len() < expected_per_target {
+            // Got some but not all expected replies. Likely a stage crash
+            // mid-batch or a Shutdown that beat the rest to app.exit().
+            println!(
+                "{name}: only {} of {} replies received",
+                replies.len(),
+                expected_per_target
+            );
+        }
+        for (ok, message) in &replies {
+            if *ok {
+                println!(
+                    "{name}: ok{}",
+                    if message.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" — {message}")
+                    }
+                );
+            } else {
+                println!("{name}: ERR {message}");
+                all_ok = false;
+            }
+        }
+    }
+
+    if !all_ok {
+        bail!("one or more targets did not reply or returned an error");
+    }
     Ok(())
 }
 

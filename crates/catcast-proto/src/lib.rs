@@ -113,8 +113,21 @@ pub enum Message {
     /// Cleanly terminate the catstage process.
     Shutdown,
 
-    // ─── Stage -> CLI (single State carries everything) ──────────────────
+    // ─── Stage -> CLI ────────────────────────────────────────────────────
+    /// Snapshot of the stage's current State. Sent unsolicited on connect
+    /// and in reply to `GetState`. Doubles as a liveness signal.
     State(catcast_core::State),
+    /// Per-command outcome. Stages emit exactly one `Reply` for every
+    /// command they receive (Pause, Play, Nav, AutostartInstall, …) so the
+    /// CLI knows whether the action landed. `ok=false` carries a
+    /// human-readable error string in `message`; `ok=true` may carry a
+    /// short success note ("installed at /path", "shortcut removed",
+    /// "paused", …) or an empty string when there is nothing useful to
+    /// say. `GetState`/`State`/`Reply` themselves do not produce replies.
+    Reply {
+        ok: bool,
+        message: String,
+    },
 }
 
 /// A symmetric key derived from a PSK. Cached; never serialised.
