@@ -15,6 +15,12 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 #[derive(Debug, Clone)]
+// macOS install() is a no-op and reads neither field, so without this
+// dead_code fires on darwin only.
+#[cfg_attr(
+    all(not(target_os = "windows"), not(target_os = "linux")),
+    allow(dead_code)
+)]
 pub struct AutostartArgs {
     /// `--socks <wss://...>` that the autostarted process should use.
     pub socks: String,
