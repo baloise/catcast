@@ -79,7 +79,7 @@ impl LogicHandle {
     pub fn call(&self, fn_name: &str, collector: Arc<Mutex<Plan>>) -> Result<()> {
         // Re-register host fns bound to the supplied collector so the script's
         // body can call `nav`, `pause`, `play` etc. and the scheduler sees them.
-        let mut engine = Engine::new();
+        let mut engine = make_engine();
         register_host_fns(&mut engine, collector);
         // Recompile so the AST is bound to the fresh engine.
         let ast = engine
@@ -96,6 +96,32 @@ impl LogicHandle {
     }
 }
 
+/// Construct a Rhai [`Engine`] with our depth limits applied. Rhai's stock
+/// defaults are 32/16 in debug builds (64/32 release), which the shipped
+/// `default-logic/default.rhai` brushes past on a `#{ url: entry["url"], … }`
+/// inside a `for` body — the resulting "Expression exceeds maximum
+/// complexity" was a non-obvious foot-gun for anyone authoring logic. The
+/// bumped 128/64 ceiling is still well under runaway recursion territory but
+/// well above realistic dashboard-config scripts. Centralised so [`evaluate`]
+/// and [`LogicHandle::call`] (which both spin up an Engine) share the same
+/// settings.
+fn make_engine() -> Engine {
+    let mut e = Engine::new();
+    e.set_max_expr_depths(128, 64);
+    e
+}
+
+/// Syntax-check a Rhai source without running it. Used by the SetLogic path
+/// to surface parse / depth-limit errors to the operator *before* we persist
+/// a broken script and flip `has_logic = true`. Cheaper than [`evaluate`]
+/// because it skips the `run(cfg)` call.
+pub fn compile_check(rhai_src: &str) -> Result<()> {
+    make_engine()
+        .compile(rhai_src)
+        .context("compiling Rhai logic source")?;
+    Ok(())
+}
+
 /// Parse `rhai_src`, register host fns bound to a fresh [`Plan`], and run the
 /// script's top-level `run(cfg)` entry point with the current `Config` as a
 /// Rhai map. Returns both the populated plan and a handle for later cron
@@ -105,7 +131,7 @@ pub fn evaluate(rhai_src: &str, cfg: &Config) -> Result<(Plan, LogicHandle)> {
         default_secs: 30,
         ..Plan::default()
     }));
-    let mut engine = Engine::new();
+    let mut engine = make_engine();
     register_host_fns(&mut engine, Arc::clone(&plan));
 
     let ast = engine

@@ -582,16 +582,20 @@ async fn set_config(
         sh.config_yaml = Some(yaml);
         sh.state.has_config = true;
     }
-    rebuild_and_send(shared, sched, logic_handle).await;
+    let rebuild_err = rebuild_and_send(shared, sched, logic_handle).await;
     about::emit_state(app, WINDOW_LABEL);
-    Ok(if warnings.is_empty() {
-        "config saved".into()
+    let head = if warnings.is_empty() {
+        "config saved".to_string()
     } else {
         format!(
             "config saved ({} warning{})",
             warnings.len(),
             if warnings.len() == 1 { "" } else { "s" }
         )
+    };
+    Ok(match rebuild_err {
+        None => head,
+        Some(e) => format!("{head}, but plan rebuild failed: {e}"),
     })
 }
 
@@ -602,34 +606,53 @@ async fn set_logic(
     logic_handle: &Arc<Mutex<Option<LogicHandle>>>,
     app: &tauri::AppHandle,
 ) -> Result<String, String> {
+    // Syntax-check the script *before* we persist or flip `has_logic`. This
+    // catches "Expression exceeds maximum complexity" and other parse errors
+    // upfront, so the operator sees the failure immediately instead of the
+    // stage silently running on an empty plan.
+    logic::compile_check(&rhai).map_err(|e| format!("bad rhai: {e:#}"))?;
     persist::save_logic_rhai(&rhai).map_err(|e| format!("persist logic failed: {e:#}"))?;
     {
         let mut sh = shared.lock().unwrap();
         sh.logic_rhai = Some(rhai);
         sh.state.has_logic = true;
     }
-    rebuild_and_send(shared, sched, logic_handle).await;
+    let rebuild_err = rebuild_and_send(shared, sched, logic_handle).await;
     about::emit_state(app, WINDOW_LABEL);
-    Ok("logic saved".into())
+    Ok(match rebuild_err {
+        None => "logic saved".into(),
+        Some(e) => format!("logic saved, but plan rebuild failed: {e}"),
+    })
 }
 
+/// Try to (re)build the plan from current `config_yaml` + `logic_rhai` and
+/// hand it to the scheduler. Returns `Some(error)` if both pieces are present
+/// but evaluation failed (e.g. Rhai runtime error against a real cfg);
+/// returns `None` either way when the plan was either rebuilt cleanly or one
+/// of the pieces is missing (nothing to do yet). The caller decides whether
+/// the runtime error should surface in their reply.
 async fn rebuild_and_send(
     shared: &Arc<Mutex<Shared>>,
     sched: &tokio::sync::mpsc::Sender<scheduler::Cmd>,
     logic_handle: &Arc<Mutex<Option<LogicHandle>>>,
-) {
+) -> Option<String> {
     let (yaml, rhai) = {
         let sh = shared.lock().unwrap();
         (sh.config_yaml.clone(), sh.logic_rhai.clone())
     };
     let (Some(yaml), Some(rhai)) = (yaml, rhai) else {
-        return;
+        return None;
     };
     match build_plan(&yaml, &rhai, logic_handle) {
         Ok(plan) => {
             let _ = sched.send(scheduler::Cmd::Rebuild(plan)).await;
+            None
         }
-        Err(e) => eprintln!("catstage: plan rebuild failed: {e:#}"),
+        Err(e) => {
+            let msg = format!("{e:#}");
+            eprintln!("catstage: plan rebuild failed: {msg}");
+            Some(msg)
+        }
     }
 }
 
