@@ -30,6 +30,46 @@ use crate::logic::{LogicHandle, Plan};
 
 const WINDOW_LABEL: &str = "stage";
 
+/// Installed on every navigation via `WebviewWindow::on_page_load(...)` so
+/// the kiosk's hotkeys (F1 / F11 / F12 / Ctrl+Alt+M / Esc) keep working even
+/// after the webview has navigated to an external rotation URL where the
+/// about page's own JS is no longer present. The about page's invoke bridge
+/// is window-scoped (per our capability file), so the IPC calls succeed
+/// regardless of which URL is loaded.
+const HOTKEY_SCRIPT: &str = r#"
+(function () {
+  if (window.__catcastHotkeysInstalled) return;
+  window.__catcastHotkeysInstalled = true;
+  const inv = (cmd, args) => {
+    try {
+      const t = window.__TAURI__ || {};
+      const fn = (t.core && t.core.invoke) || t.invoke;
+      if (typeof fn === "function") {
+        const r = fn(cmd, args);
+        if (r && typeof r.catch === "function") r.catch(() => {});
+      }
+    } catch (_) {}
+  };
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "F1") {
+      ev.preventDefault();
+      inv("cmd_nav_about");
+    } else if (ev.key === "F11") {
+      ev.preventDefault();
+      inv("cmd_toggle_fullscreen");
+    } else if (ev.key === "F12") {
+      ev.preventDefault();
+      inv("cmd_toggle_devtools");
+    } else if (ev.ctrlKey && ev.altKey && (ev.key === "m" || ev.key === "M")) {
+      ev.preventDefault();
+      inv("cmd_hotkey_toggle_manual");
+    } else if (ev.key === "Escape") {
+      inv("cmd_hotkey_escape");
+    }
+  }, true);
+})();
+"#;
+
 #[derive(Parser, Clone)]
 #[command(name = "catstage", version, about = "CatCast fullscreen viewer")]
 struct Args {
@@ -101,6 +141,12 @@ fn main() -> Result<()> {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // Re-install the hotkey handlers after every navigation so
+        // F1/F11/F12/Ctrl+Alt+M/Esc keep working on rotation URLs — not
+        // just on the about page where they were originally bound.
+        .on_page_load(|webview, _payload| {
+            let _ = webview.eval(HOTKEY_SCRIPT);
+        })
         .invoke_handler(tauri::generate_handler![
             about::get_snapshot,
             about::cmd_pause,
@@ -117,6 +163,7 @@ fn main() -> Result<()> {
             about::cmd_exit,
             about::cmd_log,
             about::cmd_toggle_devtools,
+            about::cmd_nav_about,
         ])
         .setup(move |app| {
             // Force fullscreen at runtime in addition to the config-time

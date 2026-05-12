@@ -308,8 +308,7 @@ pub async fn cmd_log(level: String, msg: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Toggle the WebKit / WebView2 inspector window. Bound to F12 on the about
-/// page so an operator can attach DevTools without restarting with --devtools.
+/// Toggle the WebKit / WebView2 inspector window. Bound to F12.
 #[tauri::command]
 pub async fn cmd_toggle_devtools(window: tauri::Window) -> Result<(), String> {
     let label = window.label().to_string();
@@ -320,6 +319,26 @@ pub async fn cmd_toggle_devtools(window: tauri::Window) -> Result<(), String> {
         w.close_devtools();
     } else {
         w.open_devtools();
+    }
+    Ok(())
+}
+
+/// Navigate back to the about page and switch the stage into manual mode.
+/// Bound to F1 — works on the about page itself (idempotent there) and on
+/// any external URL the kiosk has navigated to.
+#[tauri::command]
+pub async fn cmd_nav_about(
+    window: tauri::Window,
+    ctx: tauri::State<'_, TauriCtx>,
+    about: tauri::State<'_, AboutUrl>,
+) -> Result<(), String> {
+    ctx.sched_tx
+        .send(scheduler::Cmd::Manual(true))
+        .await
+        .map_err(to_string)?;
+    let label = window.label().to_string();
+    if let Some(w) = window.get_webview_window(&label) {
+        w.navigate(about.0.clone()).map_err(to_string)?;
     }
     Ok(())
 }

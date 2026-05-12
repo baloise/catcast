@@ -261,6 +261,7 @@
 
       <section class="hints">
         Shortcuts:
+        <kbd>F1</kbd> back to about ·
         <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>M</kbd> toggle manual ·
         <kbd>F11</kbd> toggle fullscreen ·
         <kbd>F12</kbd> toggle devtools ·
@@ -462,23 +463,10 @@
           if (ev.key === "Enter") go();
         });
 
-        // Window-focused hotkeys (the catcast://about page IS manual mode, so
-        // catching keys here is sufficient — see plan).
-        document.addEventListener("keydown", (ev) => {
-          if (ev.ctrlKey && ev.altKey && (ev.key === "m" || ev.key === "M")) {
-            ev.preventDefault();
-            invoke("cmd_hotkey_toggle_manual").catch((e) => console.error(e));
-          } else if (ev.key === "F11") {
-            ev.preventDefault();
-            invoke("cmd_toggle_fullscreen").catch((e) => console.error(e));
-          } else if (ev.key === "F12") {
-            ev.preventDefault();
-            invoke("cmd_toggle_devtools").catch((e) => console.error(e));
-          } else if (ev.key === "Escape") {
-            ev.preventDefault();
-            invoke("cmd_hotkey_escape").catch((e) => console.error(e));
-          }
-        });
+        // Hotkeys (F1 / F11 / F12 / Ctrl+Alt+M / Esc) are installed once
+        // per navigation by Rust via WebviewWindow::on_page_load, so they
+        // also fire on rotation URLs — not just here on the about page.
+        // See HOTKEY_SCRIPT in crates/catstage/src/main.rs.
 
         // Live updates.
         listen("catcast://state", (ev) => {
