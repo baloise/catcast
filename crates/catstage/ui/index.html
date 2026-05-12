@@ -86,8 +86,13 @@
         gap: 16px; padding-bottom: 16px; border-bottom: 1px solid var(--line);
       }
       header .title { display: flex; align-items: center; gap: 14px; }
-      header .logo { flex: 0 0 auto; }
-      header .logo svg { width: 56px; height: 56px; display: block; }
+      header .logo {
+        flex: 0 0 auto;
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 72px; height: 72px; padding: 8px;
+        background: #ffffff; border-radius: 50%;
+      }
+      header .logo svg { width: 100%; height: 100%; display: block; }
       header h1 { margin: 0; font-size: 28px; font-weight: 600; }
       header .meta { color: var(--muted); font-size: 13px; }
       header .broker { display: flex; align-items: center; gap: 8px; }
