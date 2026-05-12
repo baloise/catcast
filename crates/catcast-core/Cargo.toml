@@ -14,3 +14,8 @@ thiserror = { workspace = true }
 chrono = { workspace = true }
 cron = { workspace = true }
 humantime = { workspace = true }
+
+# Installs shared git hooks from `.cargo-husky/hooks/` into `.git/hooks/`
+# the first time any workspace test build runs. See `.cargo-husky/`.
+[dev-dependencies]
+cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }

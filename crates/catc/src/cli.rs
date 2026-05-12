@@ -208,17 +208,11 @@ pub enum AliasCmd {
     /// List stored aliases.
     List,
     /// Run a stored alias by name.
-    Run {
-        name: String,
-    },
+    Run { name: String },
     /// Bulk-load aliases from a YAML file.
-    Import {
-        file: String,
-    },
+    Import { file: String },
     /// Bulk-save aliases to a YAML file.
-    Export {
-        file: String,
-    },
+    Export { file: String },
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
@@ -263,8 +257,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         },
         Cmd::Logic { sub } => match sub {
             LogicCmd::Import { file, targets } => {
-                const DEFAULT_LOGIC: &str =
-                    include_str!("../../../default-logic/default.rhai");
+                const DEFAULT_LOGIC: &str = include_str!("../../../default-logic/default.rhai");
                 let rhai = match file {
                     Some(path) => {
                         fs::read_to_string(&path).with_context(|| format!("read {path}"))?

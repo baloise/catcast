@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! cargo fmt --all --check; then
+  echo
+  echo "pre-push: cargo fmt --all --check failed — run 'cargo fmt --all' and commit." >&2
+  exit 1
+fi

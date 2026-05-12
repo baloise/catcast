@@ -419,7 +419,10 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn macos_xml_escape_handles_special_chars() {
-        assert_eq!(xml_escape("a&b<c>d\"e'f"), "a&amp;b&lt;c&gt;d&quot;e&apos;f");
+        assert_eq!(
+            xml_escape("a&b<c>d\"e'f"),
+            "a&amp;b&lt;c&gt;d&quot;e&apos;f"
+        );
         assert_eq!(xml_escape("plain"), "plain");
     }
 }
