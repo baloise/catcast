@@ -45,14 +45,13 @@ mod worker_impl {
         state: State,
     }
 
-    #[durable_object]
     impl DurableObject for Room {
         fn new(state: State, _env: Env) -> Self {
             console_error_panic_hook::set_once();
             Self { state }
         }
 
-        async fn fetch(&mut self, _req: Request) -> Result<Response> {
+        async fn fetch(&self, _req: Request) -> Result<Response> {
             let pair = WebSocketPair::new()?;
             // Stamp each socket with a unique id via serialize_attachment.
             // We read it back inside websocket_message to skip the sender
@@ -65,7 +64,7 @@ mod worker_impl {
         }
 
         async fn websocket_message(
-            &mut self,
+            &self,
             ws: WebSocket,
             msg: WebSocketIncomingMessage,
         ) -> Result<()> {
@@ -87,7 +86,7 @@ mod worker_impl {
         }
 
         async fn websocket_close(
-            &mut self,
+            &self,
             _ws: WebSocket,
             _code: usize,
             _reason: String,
@@ -96,7 +95,7 @@ mod worker_impl {
             Ok(())
         }
 
-        async fn websocket_error(&mut self, _ws: WebSocket, _err: Error) -> Result<()> {
+        async fn websocket_error(&self, _ws: WebSocket, _err: Error) -> Result<()> {
             Ok(())
         }
     }
