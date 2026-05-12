@@ -30,64 +30,27 @@ use crate::logic::{LogicHandle, Plan};
 
 const WINDOW_LABEL: &str = "stage";
 
-/// Build the hotkey-installer script for `WebviewWindow::on_page_load`.
-/// Tauri 2 doesn't inject `window.__TAURI__` on cross-origin pages, so we
-/// can't rely on `invoke()` from rotation URLs. The script tries IPC first;
-/// where that fails, it falls back to pure-JS equivalents:
-///
-/// * F1 / Ctrl+Alt+M / Esc → `window.location.href = ABOUT_URL` (back to
-///   the about page, where IPC works).
-/// * F11 → HTML5 Fullscreen API on the document element.
-/// * F12 → IPC-only; WebKit/WebView2's built-in F12 binding fills in on
-///   external pages.
-fn build_hotkey_script(about_url: &str) -> String {
+/// Build the F1-only escape script for `WebviewWindow::on_page_load`.
+/// Pure JS, no IPC dependency — works on any page including external
+/// rotation URLs where Tauri doesn't inject `window.__TAURI__`. Operators
+/// at the physical kiosk press F1 to get back to the admin page; every
+/// other action is a `catc` command from a laptop.
+fn build_escape_script(about_url: &str) -> String {
     // Escape just in case the URL ever contains characters that would break
-    // the JS string. Tauri::Url is well-formed but defence in depth.
+    // the JS string. tauri::Url is well-formed but defence in depth.
     let about_url = about_url.replace('\\', "\\\\").replace('"', "\\\"");
     format!(
         r#"
 (function () {{
-  if (window.__catcastHotkeysInstalled) return;
-  window.__catcastHotkeysInstalled = true;
+  if (window.__catcastEscapeInstalled) return;
+  window.__catcastEscapeInstalled = true;
   const ABOUT_URL = "{about_url}";
-  const inv = (cmd, args) => {{
-    try {{
-      const t = window.__TAURI__;
-      const fn = t && ((t.core && t.core.invoke) || t.invoke);
-      if (typeof fn === "function") {{
-        const r = fn(cmd, args);
-        if (r && typeof r.catch === "function") r.catch(() => {{}});
-        return true;
-      }}
-    }} catch (_) {{}}
-    return false;
-  }};
-  const backToAbout = () => {{ window.location.href = ABOUT_URL; }};
   document.addEventListener("keydown", (ev) => {{
     if (ev.key === "F1") {{
       ev.preventDefault();
-      if (!inv("cmd_nav_about")) backToAbout();
-    }} else if (ev.key === "F11") {{
-      ev.preventDefault();
-      if (!inv("cmd_toggle_fullscreen")) {{
-        // HTML5 Fullscreen fallback for cross-origin pages without IPC.
-        if (document.fullscreenElement) {{
-          if (document.exitFullscreen) document.exitFullscreen();
-        }} else if (document.documentElement.requestFullscreen) {{
-          document.documentElement.requestFullscreen();
-        }}
-      }}
-    }} else if (ev.key === "F12") {{
-      ev.preventDefault();
-      inv("cmd_toggle_devtools");
-    }} else if (ev.ctrlKey && ev.altKey && (ev.key === "m" || ev.key === "M")) {{
-      ev.preventDefault();
-      if (!inv("cmd_hotkey_toggle_manual")) backToAbout();
-    }} else if (ev.key === "Escape") {{
-      if (!inv("cmd_hotkey_escape")) backToAbout();
+      window.location.href = ABOUT_URL;
     }}
   }}, true);
-  inv("cmd_log", {{ level: "log", msg: "hotkeys installed on " + window.location.href }});
 }})();
 "#
     )
@@ -163,40 +126,23 @@ fn main() -> Result<()> {
     let open_devtools = args.devtools;
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        // Re-install the hotkey handlers after every navigation so
-        // F1/F11/F12/Ctrl+Alt+M/Esc keep working on rotation URLs — not
-        // just on the about page where they were originally bound.
+        // Install a tiny F1 → back-to-about handler on every page load.
+        // It's the only cross-origin shortcut we ship; everything else
+        // operators do via `catc`. See `build_escape_script` for the
+        // (intentionally minimal) JS body.
         .on_page_load(|webview, payload| {
-            // Re-install hotkey handler after every navigation. Filter to
-            // Finished so the eval doesn't run while the previous page is
-            // still unloading.
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                 let about_url = webview
                     .app_handle()
                     .try_state::<about::AboutUrl>()
                     .map(|s| s.0.to_string())
                     .unwrap_or_else(|| "tauri://localhost/".into());
-                let _ = webview.eval(build_hotkey_script(&about_url));
+                let _ = webview.eval(build_escape_script(&about_url));
             }
         })
         .invoke_handler(tauri::generate_handler![
             about::get_snapshot,
-            about::cmd_pause,
-            about::cmd_play,
-            about::cmd_manual,
-            about::cmd_toggle_fullscreen,
-            about::cmd_force_reconnect,
-            about::cmd_reload_from_disk,
-            about::cmd_install_autostart,
-            about::cmd_nav,
-            about::cmd_open_dir,
-            about::cmd_hotkey_toggle_manual,
-            about::cmd_hotkey_escape,
-            about::cmd_exit,
             about::cmd_log,
-            about::cmd_toggle_devtools,
-            about::cmd_nav_about,
         ])
         .setup(move |app| {
             // Force fullscreen at runtime in addition to the config-time
@@ -242,10 +188,7 @@ fn main() -> Result<()> {
                 shared: std::sync::Arc::clone(&shared),
                 broker_url: broker_url.clone(),
                 sched_tx: sched_tx.clone(),
-                logic_handle: std::sync::Arc::clone(&logic_handle),
-                out_tx: std::sync::Arc::clone(&out_tx),
                 stage_name: stage_name.clone(),
-                socks_abort: std::sync::Arc::clone(&socks_abort),
             });
 
             let handle = app.handle().clone();
@@ -534,6 +477,49 @@ async fn dispatch(
         Message::GetState => {
             let snap = shared.lock().unwrap().state.clone();
             broadcast(&out, Message::State(snap));
+        }
+        Message::AutostartInstall => {
+            let (socks, name) = match app.try_state::<crate::about::TauriCtx>() {
+                Some(ctx) => (
+                    ctx.inner().broker_url.clone(),
+                    Some(ctx.inner().stage_name.clone()),
+                ),
+                None => return,
+            };
+            match autostart::install(&autostart::AutostartArgs { socks, name }) {
+                Ok(Some(p)) => eprintln!("autostart: installed at {}", p.display()),
+                Ok(None) => eprintln!("autostart: no-op on this OS"),
+                Err(e) => eprintln!("autostart: install failed: {e:#}"),
+            }
+            about::emit_state(&app, WINDOW_LABEL);
+        }
+        Message::AutostartUninstall => {
+            match autostart::uninstall() {
+                Ok(true) => eprintln!("autostart: shortcut removed"),
+                Ok(false) => eprintln!("autostart: nothing to remove"),
+                Err(e) => eprintln!("autostart: uninstall failed: {e:#}"),
+            }
+            about::emit_state(&app, WINDOW_LABEL);
+        }
+        Message::Fullscreen { on } => {
+            if let Some(w) = app.get_webview_window(WINDOW_LABEL) {
+                if let Err(e) = w.set_fullscreen(on) {
+                    eprintln!("set_fullscreen({on}) failed: {e}");
+                }
+            }
+        }
+        Message::DevTools { on } => {
+            if let Some(w) = app.get_webview_window(WINDOW_LABEL) {
+                if on {
+                    w.open_devtools();
+                } else {
+                    w.close_devtools();
+                }
+            }
+        }
+        Message::Shutdown => {
+            eprintln!("catstage: shutdown requested via broker");
+            app.exit(0);
         }
         Message::State(_) => {
             // Other stages on the same room might also emit State — ignore.

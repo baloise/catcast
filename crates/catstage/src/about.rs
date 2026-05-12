@@ -1,48 +1,46 @@
-//! catcast://about — the info-and-control page.
+//! catcast://about — the info-only page.
 //!
 //! Serves as `index.html` of the bundled frontend (so Tauri auto-injects
 //! `window.__TAURI__` and the IPC bridge works). The JS in `ui/index.html`
-//! invokes `get_snapshot` to populate itself on first paint, then listens for
-//! `catcast://state` events for live updates.
+//! invokes `get_snapshot` to populate itself on first paint, then listens
+//! for `catcast://state` events for live updates.
+//!
+//! Note on the design: the about page is **read-only**. Every operator
+//! action (pause, play, manual, nav, autostart install/uninstall,
+//! fullscreen, devtools, shutdown) is a CLI command — they ride the same
+//! broker the rest of the protocol uses. The only Tauri commands that
+//! survive on this surface are `get_snapshot` (the page reads its own
+//! data) and `cmd_log` (the page forwards its JS console to stderr for
+//! diagnostics).
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use anyhow::Context;
-use catcast_core::{Config, State};
-use catcast_proto::Message;
+use catcast_core::State;
 use serde::Serialize;
 use tauri::{Emitter, Manager};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::mpsc;
 
-/// The URL the window loaded on first paint — captured in `main.rs`'s setup
-/// callback and used by hotkey commands to navigate the kiosk back to the
-/// about page from a rotation URL. Platform-specific: typically
-/// `tauri://localhost/` on Linux/macOS or `http://tauri.localhost/` on Windows.
-pub struct AboutUrl(pub tauri::Url);
-
-use crate::logic::{self, LogicHandle, Plan};
 use crate::scheduler;
 use crate::Shared as MainShared;
 
-/// Runtime handles surfaced to Tauri commands as `tauri::State<TauriCtx>`.
-///
-/// Kept separate from [`MainShared`] (which the scheduler events also touch)
-/// because tauri::State requires `Send + Sync + 'static` and we want a stable
-/// boundary between scheduler/socks plumbing and the Tauri command layer.
+/// The URL the window loaded on first paint — captured in `main.rs`'s setup
+/// callback and used by the on_page_load script (`build_escape_script` in
+/// main.rs) to bring the operator back to about from any external page.
+/// Platform-specific: typically `tauri://localhost/` on Linux/macOS or
+/// `http://tauri.localhost/` on Windows.
+pub struct AboutUrl(pub tauri::Url);
+
+/// Shared runtime handles for the about page snapshot + the broker dispatch
+/// path. `make_snapshot` reads `shared`/`broker_url`/`stage_name`; the
+/// `Message::AutostartInstall` handler in main.rs reads `broker_url` and
+/// `stage_name` to populate `AutostartArgs`; bootstrap reads `sched_tx` to
+/// wire the socks inbound dispatch closure.
 pub struct TauriCtx {
     pub shared: Arc<Mutex<MainShared>>,
     pub broker_url: String,
     pub sched_tx: mpsc::Sender<scheduler::Cmd>,
-    pub logic_handle: Arc<Mutex<Option<LogicHandle>>>,
-    /// Kept for later use by `Message::GetState` replies that need to push a
-    /// State to the broker.
-    #[allow(dead_code)]
-    pub out_tx: Arc<Mutex<Option<mpsc::Sender<Message>>>>,
     pub stage_name: String,
-    /// `cmd_force_reconnect` notifies this so the socks task drops its
-    /// current connection and tries again immediately.
-    pub socks_abort: Arc<Notify>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -107,7 +105,8 @@ fn file_entries() -> Vec<FileEntry> {
 }
 
 // ---------------------------------------------------------------------------
-// Tauri commands
+// Tauri commands — only two survive: the page's read of its own data, and
+// the JS console forwarding sink.
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
@@ -115,254 +114,19 @@ pub async fn get_snapshot(ctx: tauri::State<'_, TauriCtx>) -> Result<Snapshot, S
     Ok(make_snapshot(&ctx))
 }
 
-#[tauri::command]
-pub async fn cmd_pause(ctx: tauri::State<'_, TauriCtx>) -> Result<(), String> {
-    ctx.sched_tx
-        .send(scheduler::Cmd::Pause)
-        .await
-        .map_err(to_string)
-}
-
-#[tauri::command]
-pub async fn cmd_play(ctx: tauri::State<'_, TauriCtx>) -> Result<(), String> {
-    ctx.sched_tx
-        .send(scheduler::Cmd::Play)
-        .await
-        .map_err(to_string)
-}
-
-#[tauri::command]
-pub async fn cmd_manual(on: bool, ctx: tauri::State<'_, TauriCtx>) -> Result<(), String> {
-    ctx.sched_tx
-        .send(scheduler::Cmd::Manual(on))
-        .await
-        .map_err(to_string)
-}
-
-#[tauri::command]
-pub async fn cmd_toggle_fullscreen(window: tauri::Window) -> Result<(), String> {
-    let now = window.is_fullscreen().map_err(to_string)?;
-    window.set_fullscreen(!now).map_err(to_string)
-}
-
-#[tauri::command]
-pub async fn cmd_force_reconnect(ctx: tauri::State<'_, TauriCtx>) -> Result<(), String> {
-    // Poke the socks task: it drops the current WebSocket (or cuts a backoff
-    // sleep short) and reconnects immediately.
-    ctx.socks_abort.notify_one();
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn cmd_reload_from_disk(ctx: tauri::State<'_, TauriCtx>) -> Result<(), String> {
-    let (yaml, rhai) = {
-        let sh = ctx.shared.lock().expect("Shared poisoned");
-        (sh.config_yaml.clone(), sh.logic_rhai.clone())
-    };
-    let Some(yaml) = yaml else {
-        return Err("no config.yaml on disk".into());
-    };
-    let Some(rhai) = rhai else {
-        return Err("no logic.rhai on disk".into());
-    };
-    let plan = build_plan(&yaml, &rhai, &ctx.logic_handle).map_err(|e| format!("{e:#}"))?;
-    ctx.sched_tx
-        .send(scheduler::Cmd::Rebuild(plan))
-        .await
-        .map_err(to_string)
-}
-
-#[tauri::command]
-pub async fn cmd_install_autostart(
-    name: String,
-    socks: String,
-    _ctx: tauri::State<'_, TauriCtx>,
-) -> Result<Option<String>, String> {
-    let args = crate::autostart::AutostartArgs {
-        socks,
-        name: if name.is_empty() { None } else { Some(name) },
-    };
-    crate::autostart::install(&args)
-        .map(|opt| opt.map(|p| p.display().to_string()))
-        .map_err(to_string)
-}
-
-#[tauri::command]
-pub async fn cmd_nav(
-    url: String,
-    window: tauri::Window,
-    ctx: tauri::State<'_, TauriCtx>,
-) -> Result<(), String> {
-    ctx.sched_tx
-        .send(scheduler::Cmd::Nav(url.clone()))
-        .await
-        .map_err(to_string)?;
-    let parsed = tauri::Url::parse(&url).map_err(to_string)?;
-    let label = window.label().to_string();
-    let w = window
-        .get_webview_window(&label)
-        .ok_or_else(|| "no webview window".to_string())?;
-    w.navigate(parsed).map_err(to_string)
-}
-
-#[tauri::command]
-pub async fn cmd_open_dir(path: String, app: tauri::AppHandle) -> Result<(), String> {
-    use tauri_plugin_opener::OpenerExt;
-    // "Open dir" semantics: regardless of whether the path is a real file,
-    // a not-yet-created file, or a directory, reveal the *directory*. The
-    // old code only stripped to the parent when `is_file()` returned true,
-    // which silently failed for files that don't exist yet (e.g. config.yaml
-    // before the operator has pushed any config).
-    let target = PathBuf::from(&path);
-    let to_reveal = if target.is_dir() {
-        target.clone()
-    } else {
-        target
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."))
-    };
-    app.opener()
-        .open_path(to_reveal.display().to_string(), None::<&str>)
-        .map_err(to_string)
-}
-
-/// Internal command: the catcast://about JS keydown handler routes Ctrl+Alt+M
-/// here so the Rust side owns the manual-mode toggle and the matching
-/// webview navigation.
-#[tauri::command]
-pub async fn cmd_hotkey_toggle_manual(
-    window: tauri::Window,
-    ctx: tauri::State<'_, TauriCtx>,
-    about: tauri::State<'_, AboutUrl>,
-) -> Result<(), String> {
-    let (now_manual, target_url) = {
-        let s = ctx.shared.lock().expect("Shared poisoned");
-        (s.state.manual, s.state.current_url.clone())
-    };
-    let next = !now_manual;
-    ctx.sched_tx
-        .send(scheduler::Cmd::Manual(next))
-        .await
-        .map_err(to_string)?;
-    let label = window.label().to_string();
-    if next {
-        if let Some(w) = window.get_webview_window(&label) {
-            w.navigate(about.0.clone()).map_err(to_string)?;
-        }
-    } else if let Some(url) = target_url {
-        if let Ok(parsed) = tauri::Url::parse(&url) {
-            if let Some(w) = window.get_webview_window(&label) {
-                let _ = w.navigate(parsed);
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Internal command: Esc inside the about page leaves manual mode. Outside
-/// manual mode it's a no-op (kiosk Esc should not exit the app).
-#[tauri::command]
-pub async fn cmd_hotkey_escape(
-    window: tauri::Window,
-    ctx: tauri::State<'_, TauriCtx>,
-) -> Result<(), String> {
-    let (is_manual, target_url) = {
-        let s = ctx.shared.lock().expect("Shared poisoned");
-        (s.state.manual, s.state.current_url.clone())
-    };
-    if !is_manual {
-        return Ok(());
-    }
-    ctx.sched_tx
-        .send(scheduler::Cmd::Manual(false))
-        .await
-        .map_err(to_string)?;
-    if let Some(url) = target_url {
-        if let Ok(parsed) = tauri::Url::parse(&url) {
-            let label = window.label().to_string();
-            if let Some(w) = window.get_webview_window(&label) {
-                let _ = w.navigate(parsed);
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Quit the catstage process. Surfaced as an `[Exit]` button on the about
-/// page for operators who need to bail out without dropping to the OS
-/// (since the kiosk window has no decorations and no taskbar).
-#[tauri::command]
-pub async fn cmd_exit(app: tauri::AppHandle) -> Result<(), String> {
-    app.exit(0);
-    Ok(())
-}
-
 /// JS console-forwarding sink. The about page wraps `console.log/warn/error`
-/// to invoke this command in addition to writing to the in-webview console,
-/// so we can grep catstage's stderr for JS issues without attaching DevTools.
-/// Levels: "log" | "info" | "warn" | "error" | "debug".
+/// to invoke this command, so we can grep catstage's stderr for JS issues
+/// without attaching DevTools. Levels: "log" | "info" | "warn" | "error" |
+/// "debug".
 #[tauri::command]
 pub async fn cmd_log(level: String, msg: String) -> Result<(), String> {
     eprintln!("[js {level}] {msg}");
     Ok(())
 }
 
-/// Toggle the WebKit / WebView2 inspector window. Bound to F12.
-#[tauri::command]
-pub async fn cmd_toggle_devtools(window: tauri::Window) -> Result<(), String> {
-    let label = window.label().to_string();
-    let Some(w) = window.get_webview_window(&label) else {
-        return Err("no webview window".into());
-    };
-    if w.is_devtools_open() {
-        w.close_devtools();
-    } else {
-        w.open_devtools();
-    }
-    Ok(())
-}
-
-/// Navigate back to the about page and switch the stage into manual mode.
-/// Bound to F1 — works on the about page itself (idempotent there) and on
-/// any external URL the kiosk has navigated to.
-#[tauri::command]
-pub async fn cmd_nav_about(
-    window: tauri::Window,
-    ctx: tauri::State<'_, TauriCtx>,
-    about: tauri::State<'_, AboutUrl>,
-) -> Result<(), String> {
-    ctx.sched_tx
-        .send(scheduler::Cmd::Manual(true))
-        .await
-        .map_err(to_string)?;
-    let label = window.label().to_string();
-    if let Some(w) = window.get_webview_window(&label) {
-        w.navigate(about.0.clone()).map_err(to_string)?;
-    }
-    Ok(())
-}
-
-fn to_string<E: std::fmt::Display>(e: E) -> String {
-    e.to_string()
-}
-
-/// Build a Plan from on-disk YAML + Rhai. Mirrors the existing build_plan in
-/// main.rs so cmd_reload_from_disk doesn't have to depend on a private fn.
-fn build_plan(
-    yaml: &str,
-    rhai: &str,
-    logic_handle: &Arc<Mutex<Option<LogicHandle>>>,
-) -> anyhow::Result<Plan> {
-    let cfg = Config::from_yaml(yaml).context("parsing config.yaml")?;
-    let _ = cfg.validate();
-    let (plan, handle) = logic::evaluate(rhai, &cfg).context("evaluating Rhai logic")?;
-    *logic_handle.lock().expect("LogicHandle poisoned") = Some(handle);
-    Ok(plan)
-}
-
-/// Push the latest snapshot to the about page (via Tauri event). Called from
-/// `SchedEvents` after state changes.
+/// Push the latest snapshot to the about page (via Tauri event). Called
+/// from `SchedEvents` (and from broker dispatch handlers in `main.rs`)
+/// after state changes.
 pub fn emit_state(app: &tauri::AppHandle, label: &str) {
     let Some(ctx) = app.try_state::<TauriCtx>() else {
         return;

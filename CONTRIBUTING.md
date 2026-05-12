@@ -74,11 +74,10 @@ cargo run -p catsocks --bin catsocks-dev
 cargo run -p catstage -- --socks ws://127.0.0.1:8787/r/dev --name kitchen
 ```
 
-Tauri opens a fullscreen window pointed at `catcast://about` — that's
-the info-and-control page. The header shows the stage name (`kitchen`).
-The Autostart panel shows the onboarding wizard since no Startup-folder
-shortcut is installed. The window stays on the about page until catc
-pushes a config + logic.
+Tauri opens a fullscreen window pointed at `catcast://about` — a
+**read-only** info page showing the stage's name, version, connection
+state, on-disk files, and autostart status. There are no buttons. Every
+operator action is a `catc` command.
 
 **Terminal 3 — the CLI:**
 
@@ -99,9 +98,26 @@ cargo run -p catc -- targets list --probe
 cargo run -p catc -- logic  import default-logic/default.rhai
 cargo run -p catc -- config import examples/config.yaml
 
-# Interrupt rotation with a timed nav.
-cargo run -p catc -- nav https://example.com --for 1m
+# Drive the stage:
+cargo run -p catc -- pause                                   # halt rotation
+cargo run -p catc -- play                                    # resume
+cargo run -p catc -- manual on                               # enter manual mode
+cargo run -p catc -- nav https://example.com --for 1m        # timed interrupt
+cargo run -p catc -- fullscreen on                           # window state
+cargo run -p catc -- devtools on                             # remote DevTools
+
+# Manage autostart (Startup-folder .lnk on Windows; no-op elsewhere):
+cargo run -p catc -- autostart install                       # uses the stage's current --socks/--name
+cargo run -p catc -- autostart uninstall
+
+# Clean shutdown:
+cargo run -p catc -- shutdown
 ```
+
+The about page has a single client-side shortcut: **F1** brings the
+kiosk back to the admin page from any URL (pure JS `location.href` —
+works on rotation URLs where the Tauri IPC bridge isn't injected). All
+other operator actions are CLI commands that travel over the broker.
 
 If you want to keep your real `~/.config/catc/` untouched while
 hacking, point catc at a throwaway dir:

@@ -76,17 +76,44 @@ pub struct Plaintext {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Message {
-    // CLI -> stage
+    // ─── CLI -> stage: scheduler / content ───────────────────────────────
     Pause,
     Play,
-    Nav { url: String },
-    NavTimed { url: String, duration_secs: u64 },
-    Manual { on: bool },
-    SetConfig { yaml: String },
-    SetLogic { rhai: String },
+    Nav {
+        url: String,
+    },
+    NavTimed {
+        url: String,
+        duration_secs: u64,
+    },
+    Manual {
+        on: bool,
+    },
+    SetConfig {
+        yaml: String,
+    },
+    SetLogic {
+        rhai: String,
+    },
     GetState,
 
-    // Stage -> CLI (single State carries everything)
+    // ─── CLI -> stage: physical-machine / window actions ─────────────────
+    /// Install (or replace) the Startup-folder shortcut on the stage's OS.
+    AutostartInstall,
+    /// Remove the Startup-folder shortcut if present.
+    AutostartUninstall,
+    /// Set the kiosk window's fullscreen state. true = enter, false = exit.
+    Fullscreen {
+        on: bool,
+    },
+    /// Open or close the WebKit/WebView2 inspector window.
+    DevTools {
+        on: bool,
+    },
+    /// Cleanly terminate the catstage process.
+    Shutdown,
+
+    // ─── Stage -> CLI (single State carries everything) ──────────────────
     State(catcast_core::State),
 }
 

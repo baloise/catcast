@@ -71,6 +71,41 @@ pub enum Cmd {
         #[command(subcommand)]
         sub: AliasCmd,
     },
+
+    /// Install or remove the Startup-folder shortcut on the target stage(s).
+    Autostart {
+        #[command(subcommand)]
+        sub: AutostartCmd,
+    },
+    /// Toggle the kiosk window's fullscreen state.
+    Fullscreen {
+        on_off: OnOff,
+        #[command(flatten)]
+        targets: Targets,
+    },
+    /// Open or close the WebKit / WebView2 inspector on the target stage(s).
+    Devtools {
+        on_off: OnOff,
+        #[command(flatten)]
+        targets: Targets,
+    },
+    /// Cleanly terminate the catstage process on the target stage(s).
+    Shutdown(Targets),
+}
+
+#[derive(Subcommand)]
+pub enum AutostartCmd {
+    /// Install a Startup-folder shortcut on the stage using its current
+    /// --socks / --name args.
+    Install {
+        #[command(flatten)]
+        targets: Targets,
+    },
+    /// Remove the Startup-folder shortcut if present.
+    Uninstall {
+        #[command(flatten)]
+        targets: Targets,
+    },
 }
 
 #[derive(Args)]
@@ -237,6 +272,21 @@ pub async fn run(cli: Cli) -> Result<()> {
             AliasCmd::Import { file } => cmd_alias_import(file),
             AliasCmd::Export { file } => cmd_alias_export(file),
         },
+        Cmd::Autostart { sub } => match sub {
+            AutostartCmd::Install { targets } => cmd_send(targets, Message::AutostartInstall).await,
+            AutostartCmd::Uninstall { targets } => {
+                cmd_send(targets, Message::AutostartUninstall).await
+            }
+        },
+        Cmd::Fullscreen { on_off, targets } => {
+            let on = matches!(on_off, OnOff::On);
+            cmd_send(targets, Message::Fullscreen { on }).await
+        }
+        Cmd::Devtools { on_off, targets } => {
+            let on = matches!(on_off, OnOff::On);
+            cmd_send(targets, Message::DevTools { on }).await
+        }
+        Cmd::Shutdown(t) => cmd_send(t, Message::Shutdown).await,
     }
 }
 

@@ -1,18 +1,9 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability — allows the stage window to call every catcast command plus the bits of Tauri's core/window/webview APIs the about page touches. The `remote` block also extends those permissions to whatever rotation URL the kiosk is currently displaying, so the on_page_load-injected hotkey handlers (F1/F11/F12/Ctrl+Alt+M/Esc) can invoke from external pages too. Threat model: rotation URLs are operator-trusted intranet content; we tolerate that any displayed page can call our commands.",
+  "description": "Default capability — the about page is read-only and uses only `get_snapshot` (its own data) and `cmd_log` (forwards JS console to stderr). Both are custom commands inherited via `core:default`; no built-in core/window/webview commands are invoked from JS in the simplified model. The Rust dispatch path for broker commands (Pause/Play/Manual/Fullscreen/DevTools/Autostart{Install,Uninstall}/Shutdown) does not need capabilities — it goes through Tauri's Rust API, not invoke().",
   "windows": ["stage"],
-  "remote": {
-    "urls": ["https://**", "http://**"]
-  },
   "permissions": [
-    "core:default",
-    "core:window:default",
-    "core:window:allow-set-fullscreen",
-    "core:window:allow-is-fullscreen",
-    "core:webview:default",
-    "opener:default",
-    "opener:allow-open-path"
+    "core:default"
   ]
 }

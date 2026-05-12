@@ -66,6 +66,24 @@ pub fn is_installed() -> Option<PathBuf> {
     None
 }
 
+/// Remove the Startup-folder shortcut if present. Returns `Ok(true)` if a
+/// shortcut was removed, `Ok(false)` if there was nothing to remove.
+#[cfg(target_os = "windows")]
+pub fn uninstall() -> Result<bool> {
+    let p = startup_dir()?.join("catstage.lnk");
+    if p.exists() {
+        std::fs::remove_file(&p)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn uninstall() -> Result<bool> {
+    Ok(false)
+}
+
 #[cfg(target_os = "windows")]
 fn startup_dir() -> Result<PathBuf> {
     let appdata = std::env::var("APPDATA")?;

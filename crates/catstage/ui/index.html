@@ -49,8 +49,6 @@
         window.addEventListener("unhandledrejection", (e) => {
           console.error("unhandled rejection:", fmt(e.reason));
         });
-        // One-shot bridge probe so we know whether window.__TAURI__ is even
-        // there. Logged async so the bridge has a tick to attach.
         setTimeout(() => {
           const t = window.__TAURI__;
           if (!t) {
@@ -108,26 +106,6 @@
       .check { width: 18px; text-align: center; }
       .check.yes { color: var(--ok); }
       .check.no { color: var(--err); }
-      input[type="text"], input[type="url"] {
-        flex: 1; padding: 8px 10px; background: #0d1117; color: var(--text);
-        border: 1px solid var(--line); border-radius: 4px; font-family: var(--font);
-        font-size: 14px;
-      }
-      input[type="text"]:focus, input[type="url"]:focus {
-        outline: none; border-color: var(--accent);
-      }
-      button {
-        padding: 8px 14px; background: #21262d; color: var(--text);
-        border: 1px solid var(--line); border-radius: 4px; cursor: pointer;
-        font-family: var(--font); font-size: 13px;
-      }
-      button:hover { background: #2d333b; border-color: #444c56; }
-      button.primary { background: #1f6feb; border-color: #1f6feb; color: white; }
-      button.primary:hover { background: #388bfd; }
-      button.danger { background: #5a1d1d; border-color: #6f2424; color: #f8a8a8; }
-      button.danger:hover { background: #7a2828; border-color: #8a3030; color: #ffd6d6; }
-      .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-      .actions .spacer { flex: 1; }
       .hints { color: var(--muted); font-size: 13px; }
       .hints kbd {
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -144,29 +122,9 @@
       .pill.playing { color: var(--ok); border-color: var(--ok); }
       .pill.manual { color: var(--accent); border-color: var(--accent); }
       .pill.idle { color: var(--muted); border-color: var(--muted); }
-      form.inline { display: flex; flex-direction: column; gap: 8px; }
-      form.inline .field { display: flex; gap: 8px; align-items: center; }
-      form.inline .field label { width: 80px; color: var(--muted); }
-      /* In-app confirm modal — themed replacement for native confirm() */
-      .modal-overlay {
-        position: fixed; inset: 0;
-        background: rgba(0, 0, 0, 0.7);
-        display: flex; align-items: center; justify-content: center;
-        z-index: 1000;
-      }
-      .modal-overlay[hidden] { display: none; }
-      .modal {
-        background: var(--panel);
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        padding: 20px 24px;
-        min-width: 280px; max-width: 420px;
-        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
-      }
-      .modal p { margin: 0 0 16px; color: var(--text); font-size: 15px; }
-      .modal .modal-actions {
-        display: flex; gap: 8px; justify-content: flex-end;
-      }
+      .autostart-state { color: var(--muted); }
+      .autostart-state.installed { color: var(--ok); }
+      .autostart-state.missing { color: var(--warn); }
     </style>
   </head>
   <body>
@@ -216,14 +174,6 @@
       </header>
 
       <section>
-        <h2>Navigate</h2>
-        <div class="row">
-          <input id="url-bar" type="url" placeholder="https://example.com" />
-          <button id="go-btn" class="primary">Go</button>
-        </div>
-      </section>
-
-      <section>
         <h2>Status</h2>
         <div class="status-grid">
           <div class="k">Mode</div><div><span id="mode-pill" class="pill">…</span></div>
@@ -241,43 +191,15 @@
 
       <section>
         <h2>Autostart</h2>
-        <div id="autostart"></div>
-      </section>
-
-      <section>
-        <h2>Actions</h2>
-        <div class="actions">
-          <button data-cmd="cmd_pause">Pause</button>
-          <button data-cmd="cmd_play">Play</button>
-          <button data-cmd="cmd_manual" data-arg-on="true">Manual on</button>
-          <button data-cmd="cmd_manual" data-arg-on="false">Manual off</button>
-          <button data-cmd="cmd_toggle_fullscreen">Toggle Fullscreen</button>
-          <button data-cmd="cmd_force_reconnect">Force reconnect</button>
-          <button data-cmd="cmd_reload_from_disk" data-confirm="Reload config and logic from disk?">Reload from disk</button>
-          <span class="spacer"></span>
-          <button data-cmd="cmd_exit" data-confirm="Exit catstage?" class="danger">Exit</button>
-        </div>
+        <div id="autostart" class="autostart-state">…</div>
       </section>
 
       <section class="hints">
-        Shortcuts:
-        <kbd>F1</kbd> back to about ·
-        <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>M</kbd> toggle manual ·
-        <kbd>F11</kbd> toggle fullscreen ·
-        <kbd>F12</kbd> toggle devtools ·
-        <kbd>Esc</kbd> exit manual
+        Shortcut: <kbd>F1</kbd> back to about (from any page). Everything
+        else — pause, play, manual on/off, nav, config import, autostart
+        install/uninstall, fullscreen, devtools, shutdown — is a
+        <code>catc</code> command.
       </section>
-    </div>
-
-    <!-- Themed replacement for native confirm() — see confirmDialog() below. -->
-    <div id="confirm-modal" class="modal-overlay" hidden>
-      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="confirm-msg">
-        <p id="confirm-msg">…</p>
-        <div class="modal-actions">
-          <button id="confirm-cancel">Cancel</button>
-          <button id="confirm-ok" class="danger">OK</button>
-        </div>
-      </div>
     </div>
 
     <script>
@@ -343,59 +265,27 @@
             path.style.overflow = "hidden";
             path.style.textOverflow = "ellipsis";
             path.textContent = f.path || "(unavailable)";
-            const btn = document.createElement("button");
-            btn.textContent = "Open dir";
-            btn.onclick = () => invoke("cmd_open_dir", { path: f.path })
-              .catch((e) => console.error("open_dir failed for", f.path, ":", e));
-            row.append(check, label, path, btn);
+            row.append(check, label, path);
             files.appendChild(row);
           });
 
           const auto = document.getElementById("autostart");
-          auto.innerHTML = "";
+          auto.classList.remove("installed", "missing");
           if (snap.autostart_path) {
+            auto.classList.add("installed");
+            auto.innerHTML = "";
             const row = document.createElement("div");
             row.className = "row";
-            row.innerHTML = `<span class="label">Installed</span><code style="flex:1">${snap.autostart_path}</code>`;
-            const reinstall = document.createElement("button");
-            reinstall.textContent = "Re-install with current args";
-            reinstall.onclick = () => invoke("cmd_install_autostart", {
-              name: snap.state.name, socks: snap.broker_url || ""
-            }).then(refresh).catch((e) => alert("Re-install failed: " + e));
-            const opendir = document.createElement("button");
-            opendir.textContent = "Open shortcut location";
-            opendir.onclick = () => invoke("cmd_open_dir", { path: snap.autostart_path })
-              .catch((e) => console.error("open_dir failed for", snap.autostart_path, ":", e));
-            row.append(reinstall, opendir);
+            row.innerHTML =
+              `<span class="check yes">✓</span>` +
+              `<span class="label">Installed</span>` +
+              `<code style="flex:1">${snap.autostart_path}</code>`;
             auto.appendChild(row);
           } else {
-            const form = document.createElement("form");
-            form.className = "inline";
-            form.innerHTML = `
-              <div class="field"><label>Name</label>
-                <input id="auto-name" type="text" value="${snap.state.name || ""}" /></div>
-              <div class="field"><label>Socks</label>
-                <input id="auto-socks" type="url" value="${snap.broker_url || ""}" /></div>
-              <div class="field"><label></label>
-                <button id="auto-install" class="primary" type="submit">Install autostart</button>
-                <span class="hints" id="auto-hint"></span>
-              </div>
-            `;
-            form.onsubmit = (ev) => {
-              ev.preventDefault();
-              const name = document.getElementById("auto-name").value.trim();
-              const socks = document.getElementById("auto-socks").value.trim();
-              invoke("cmd_install_autostart", { name, socks })
-                .then((path) => {
-                  if (path) refresh();
-                  else {
-                    document.getElementById("auto-hint").textContent =
-                      "(no-op on this platform)";
-                  }
-                })
-                .catch((e) => alert("Install failed: " + e));
-            };
-            auto.appendChild(form);
+            auto.classList.add("missing");
+            auto.textContent =
+              "Not installed. Run `catc autostart install --name " +
+              (snap.state.name || "<name>") + "` to set up auto-launch at login.";
           }
         }
 
@@ -403,80 +293,11 @@
           return invoke("get_snapshot").then(render).catch((e) => console.error(e));
         }
 
-        // Themed replacement for window.confirm(): returns a Promise<boolean>.
-        // Native confirm() on WebKitGTK leaks a "JavaScript - tauri://..."
-        // header and sometimes locks page scroll until reload.
-        function confirmDialog(msg) {
-          return new Promise((resolve) => {
-            const modal = document.getElementById("confirm-modal");
-            document.getElementById("confirm-msg").textContent = msg;
-            const ok = document.getElementById("confirm-ok");
-            const cancel = document.getElementById("confirm-cancel");
-            const escListener = (ev) => {
-              if (ev.key === "Escape") {
-                ev.stopPropagation();
-                close(false);
-              } else if (ev.key === "Enter") {
-                ev.stopPropagation();
-                close(true);
-              }
-            };
-            const close = (result) => {
-              modal.hidden = true;
-              ok.onclick = null;
-              cancel.onclick = null;
-              document.removeEventListener("keydown", escListener, true);
-              resolve(result);
-            };
-            ok.onclick = () => close(true);
-            cancel.onclick = () => close(false);
-            document.addEventListener("keydown", escListener, true);
-            modal.hidden = false;
-            cancel.focus();
-          });
-        }
-
-        // Actions row.
-        document.querySelectorAll("button[data-cmd]").forEach((btn) => {
-          btn.addEventListener("click", async () => {
-            const cmd = btn.dataset.cmd;
-            const confirmMsg = btn.dataset.confirm;
-            if (confirmMsg && !(await confirmDialog(confirmMsg))) return;
-            let args = {};
-            if (btn.dataset.argOn !== undefined) {
-              args.on = btn.dataset.argOn === "true";
-            }
-            invoke(cmd, args).catch((e) => alert(cmd + " failed: " + e));
-          });
-        });
-
-        // URL bar.
-        const goBtn = document.getElementById("go-btn");
-        const urlBar = document.getElementById("url-bar");
-        function go() {
-          const url = urlBar.value.trim();
-          if (!url) return;
-          invoke("cmd_nav", { url }).catch((e) => alert("nav failed: " + e));
-        }
-        goBtn.addEventListener("click", go);
-        urlBar.addEventListener("keydown", (ev) => {
-          if (ev.key === "Enter") go();
-        });
-
-        // Hotkeys (F1 / F11 / F12 / Ctrl+Alt+M / Esc) are installed once
-        // per navigation by Rust via WebviewWindow::on_page_load, so they
-        // also fire on rotation URLs — not just here on the about page.
-        // See HOTKEY_SCRIPT in crates/catstage/src/main.rs.
-
-        // Live updates.
+        // Live updates pushed by Rust on scheduler / connection events.
         listen("catcast://state", (ev) => {
           if (ev && ev.payload) render(ev.payload);
         });
-        listen("catcast://connection", () => {
-          // Connection events trigger a snapshot refresh — cheaper than
-          // duplicating the per-field merge logic here.
-          refresh();
-        });
+        listen("catcast://connection", () => refresh());
 
         if (initial.state) render(initial);
         refresh();

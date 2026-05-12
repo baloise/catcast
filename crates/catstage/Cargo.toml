@@ -37,7 +37,6 @@ gethostname = "1"
 tracing = "0.1"
 
 tauri = { version = "2", features = ["devtools"] }
-tauri-plugin-opener = "2"
 
 [target.'cfg(windows)'.dependencies]
 mslnk = "0.1"
