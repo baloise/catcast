@@ -38,6 +38,13 @@ pub enum Cmd {
     Play,
     /// Enter/exit manual mode. Manual mode suppresses rotation advances.
     Manual(bool),
+    /// Step the rotation by `delta` (typically -1 / +1). Bypasses pause /
+    /// manual / one-shot. The oneshot reply carries the URL of the new slot,
+    /// or `None` if the rotation is empty.
+    Step {
+        delta: i32,
+        reply: tokio::sync::oneshot::Sender<Option<String>>,
+    },
     /// Stop the task. Used in tests.
     #[allow(dead_code)]
     Shutdown,
@@ -207,6 +214,24 @@ async fn run(
                             rt.manual = on;
                             events.on_manual_change(on);
                         }
+                    }
+                    Cmd::Step { delta, reply } => {
+                        let new_url = if rt.plan.rotation.is_empty() {
+                            None
+                        } else {
+                            // rem_euclid keeps the result non-negative even
+                            // for negative `delta`, so -1 wraps to the last
+                            // entry instead of underflowing.
+                            let n = rt.plan.rotation.len() as i32;
+                            rt.idx = (rt.idx as i32 + delta).rem_euclid(n) as usize;
+                            rt.one_shot_until = None;
+                            slot_started = Instant::now();
+                            slot_duration = current_slot_duration(&rt);
+                            let u = rt.plan.rotation[rt.idx].url.clone();
+                            emit_url(&mut rt, &u, &events);
+                            Some(u)
+                        };
+                        let _ = reply.send(new_url);
                     }
                     Cmd::Shutdown => break,
                 }

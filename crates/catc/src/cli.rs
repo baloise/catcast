@@ -36,6 +36,10 @@ pub enum Cmd {
 
     Pause(Targets),
     Play(Targets),
+    /// Step the rotation one slot backward (wraps to the last entry).
+    Back(Targets),
+    /// Step the rotation one slot forward (wraps to the first entry).
+    Forward(Targets),
     Nav {
         url: String,
         /// Optional duration like `5m`, `30s`. If set, rotation resumes after.
@@ -219,6 +223,8 @@ pub async fn run(cli: Cli) -> Result<()> {
 
         Cmd::Pause(t) => cmd_send(t, Message::Pause).await,
         Cmd::Play(t) => cmd_send(t, Message::Play).await,
+        Cmd::Back(t) => cmd_send(t, Message::Back).await,
+        Cmd::Forward(t) => cmd_send(t, Message::Forward).await,
         Cmd::Nav {
             url,
             r#for,

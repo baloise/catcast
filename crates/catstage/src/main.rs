@@ -448,6 +448,8 @@ async fn dispatch(
             let _ = sched.send(Cmd::Play).await;
             Some(Ok(decorate("playing", &shared)))
         }
+        Message::Back => Some(step_rotation(&sched, -1, "back").await),
+        Message::Forward => Some(step_rotation(&sched, 1, "forward").await),
         Message::Nav { url } => {
             let m = format!("navigating to {url}");
             let _ = sched.send(Cmd::Nav(url)).await;
@@ -612,6 +614,35 @@ fn decorate(verb: &str, shared: &Arc<Mutex<Shared>>) -> String {
     match hint {
         Some(h) => format!("{verb} — {h}"),
         None => verb.into(),
+    }
+}
+
+/// Send a `Cmd::Step(delta)` to the scheduler and wait for the oneshot reply
+/// carrying the URL of the new rotation slot. Used by the Back / Forward
+/// dispatch arms. `verb` is "back" / "forward" — used to build the reply
+/// text. On empty rotation we return an error reply so the operator sees the
+/// real reason ("rotation is empty — push a config first") instead of a
+/// silent success.
+async fn step_rotation(
+    sched: &tokio::sync::mpsc::Sender<scheduler::Cmd>,
+    delta: i32,
+    verb: &str,
+) -> Result<String, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if sched
+        .send(scheduler::Cmd::Step { delta, reply: tx })
+        .await
+        .is_err()
+    {
+        return Err("scheduler is gone".into());
+    }
+    match rx.await {
+        Ok(Some(url)) => Ok(format!("{verb} — on {url}")),
+        Ok(None) => Err(
+            "rotation is empty — push a config + logic with `catc config import` / `catc logic import`"
+                .into(),
+        ),
+        Err(_) => Err("scheduler dropped reply before sending".into()),
     }
 }
 

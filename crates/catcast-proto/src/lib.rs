@@ -91,6 +91,13 @@ pub enum Message {
     Manual {
         on: Option<bool>,
     },
+    /// Step the rotation one slot backward (wraps from index 0 to the last
+    /// entry). Useful for operators previewing a rotation manually. Works
+    /// regardless of pause/manual — bypasses the auto-advance gate.
+    Back,
+    /// Step the rotation one slot forward (wraps from the last entry back to
+    /// index 0). See [`Back`].
+    Forward,
     SetConfig {
         yaml: String,
     },
