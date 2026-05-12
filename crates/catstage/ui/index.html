@@ -296,6 +296,9 @@
 
         if (initial.state) render(initial);
         refresh();
+        // Being on the about page implies Idle — assert it so F1 from a
+        // rotation URL pauses the scheduler too, not just navigates.
+        invoke("enter_idle").catch((e) => console.error(e));
       })();
     </script>
   </body>

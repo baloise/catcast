@@ -143,6 +143,7 @@ fn main() -> Result<()> {
         .invoke_handler(tauri::generate_handler![
             about::get_snapshot,
             about::cmd_log,
+            about::enter_idle,
         ])
         .setup(move |app| {
             // Force fullscreen at runtime in addition to the config-time

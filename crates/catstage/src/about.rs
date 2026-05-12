@@ -5,13 +5,12 @@
 //! invokes `get_snapshot` to populate itself on first paint, then listens
 //! for `catcast://state` events for live updates.
 //!
-//! Note on the design: the about page is **read-only**. Every operator
-//! action (pause, play, manual, nav, autostart install/uninstall,
-//! fullscreen, devtools, shutdown) is a CLI command — they ride the same
-//! broker the rest of the protocol uses. The only Tauri commands that
-//! survive on this surface are `get_snapshot` (the page reads its own
-//! data) and `cmd_log` (the page forwards its JS console to stderr for
-//! diagnostics).
+//! Note on the design: the about page UI is read-only — no buttons; every
+//! operator action is a `catc` command. The Tauri commands that survive
+//! on this surface are: `get_snapshot` (the page reads its own data),
+//! `cmd_log` (forwards JS console to stderr for diagnostics), and
+//! `enter_idle` (visiting the page asserts `Mode::Idle`, so F1 from a
+//! rotation URL is equivalent to `catc about`).
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -122,6 +121,19 @@ pub async fn get_snapshot(ctx: tauri::State<'_, TauriCtx>) -> Result<Snapshot, S
 pub async fn cmd_log(level: String, msg: String) -> Result<(), String> {
     eprintln!("[js {level}] {msg}");
     Ok(())
+}
+
+/// Assert `Mode::Idle` while the about page is showing. Called by the page's
+/// first-paint JS so that arriving via F1 (which is a pure-JS
+/// `window.location.href` jump and can't speak the broker protocol) still
+/// pauses rotation — otherwise the scheduler would yank the operator back
+/// to a rotation URL at the next slot boundary. Idempotent when already Idle.
+#[tauri::command]
+pub async fn enter_idle(ctx: tauri::State<'_, TauriCtx>) -> Result<(), String> {
+    ctx.sched_tx
+        .send(scheduler::Cmd::Idle)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Push the latest snapshot to the about page (via Tauri event). Called

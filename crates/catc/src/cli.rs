@@ -21,25 +21,21 @@ pub enum Cmd {
         #[arg(long)]
         socks: String,
     },
-    /// Register a stage by name (read it off the stage's catcast://about page).
-    AddStage {
-        name: String,
+    /// Manage the local stage registry (catc.toml).
+    Stage {
+        #[command(subcommand)]
+        sub: StageCmd,
     },
-    /// Forget a stage.
-    RemoveStage {
-        name: String,
-    },
-    /// Mark stages active.
-    Activate(StageList),
-    /// Mark stages inactive.
-    Deactivate(StageList),
 
+    /// Freeze rotation on the current URL.
     Pause(Targets),
+    /// Resume rotation.
     Play(Targets),
-    /// Step the rotation one slot backward (wraps to the last entry).
+    /// Step the rotation one slot backward.
     Back(Targets),
-    /// Step the rotation one slot forward (wraps to the first entry).
+    /// Step the rotation one slot forward.
     Forward(Targets),
+    /// Navigate to a URL. With `--for <dur>`, auto-resumes rotation after.
     Nav {
         url: String,
         /// Optional duration like `5m`, `30s`. If set, rotation resumes after.
@@ -48,52 +44,48 @@ pub enum Cmd {
         #[command(flatten)]
         targets: Targets,
     },
+    /// Import or export the rotation config (YAML).
     Config {
         #[command(subcommand)]
         sub: ConfigCmd,
     },
+    /// Import or export the rotation logic (Rhai).
     Logic {
         #[command(subcommand)]
         sub: LogicCmd,
     },
+    /// Import or export config + logic together.
     State {
         #[command(subcommand)]
         sub: StateCmd,
     },
 
-    Targets {
-        #[command(subcommand)]
-        sub: TargetsCmd,
-    },
+    /// Define and run command aliases.
     Alias {
         #[command(subcommand)]
         sub: AliasCmd,
     },
 
-    /// Install or remove the Startup-folder shortcut on the target stage(s).
+    /// Install or remove the Startup-folder shortcut.
     Autostart {
         #[command(subcommand)]
         sub: AutostartCmd,
     },
-    /// Set or toggle the kiosk window's fullscreen state. Omit `on|off`
-    /// to flip the current value.
+    /// Set the kiosk's fullscreen state. Omit `on|off` to toggle.
     Fullscreen {
         on_off: Option<OnOff>,
         #[command(flatten)]
         targets: Targets,
     },
-    /// Open, close, or toggle the WebKit / WebView2 inspector on the target
-    /// stage(s). Omit `on|off` to flip the current value.
+    /// Open the WebKit/WebView2 inspector. Omit `on|off` to toggle.
     Devtools {
         on_off: Option<OnOff>,
         #[command(flatten)]
         targets: Targets,
     },
-    /// Navigate the kiosk back to its about page (equivalent to pressing F1
-    /// at the physical screen). The stage knows its own platform-specific
-    /// about URL, so this works the same on Linux and Windows.
+    /// Park the kiosk on its about page (equivalent to F1 at the screen). Stops rotation.
     About(Targets),
-    /// Cleanly terminate the catstage process on the target stage(s).
+    /// Cleanly stop the stage process.
     Shutdown(Targets),
 }
 
@@ -140,11 +132,13 @@ pub enum OnOff {
 
 #[derive(Subcommand)]
 pub enum ConfigCmd {
+    /// Push a config YAML file to the target stage(s).
     Import {
         file: String,
         #[command(flatten)]
         targets: Targets,
     },
+    /// Print the active config to stdout (needs exactly one target).
     Export {
         #[command(flatten)]
         targets: Targets,
@@ -153,11 +147,13 @@ pub enum ConfigCmd {
 
 #[derive(Subcommand)]
 pub enum LogicCmd {
+    /// Push a Rhai logic file to the target stage(s).
     Import {
         file: String,
         #[command(flatten)]
         targets: Targets,
     },
+    /// Print the active logic to stdout (needs exactly one target).
     Export {
         #[command(flatten)]
         targets: Targets,
@@ -166,11 +162,13 @@ pub enum LogicCmd {
 
 #[derive(Subcommand)]
 pub enum StateCmd {
+    /// Push `config.yaml` and `logic.rhai` from <dir> to the target stage(s).
     Import {
         file: String,
         #[command(flatten)]
         targets: Targets,
     },
+    /// Write the active config + logic into <dir> (needs exactly one target).
     Export {
         /// Directory to write `config.yaml` and `logic.rhai` into. Created
         /// if it doesn't exist. Symmetric with `state import <dir>`.
@@ -181,7 +179,15 @@ pub enum StateCmd {
 }
 
 #[derive(Subcommand)]
-pub enum TargetsCmd {
+pub enum StageCmd {
+    /// Register a stage by name (read it off the stage's catcast://about page).
+    Add { name: String },
+    /// Forget a stage.
+    Remove { name: String },
+    /// Mark stages active.
+    Activate(StageList),
+    /// Mark stages inactive.
+    Deactivate(StageList),
     /// List configured stages.
     List {
         /// Send a GetState to each and report which respond.
@@ -192,18 +198,23 @@ pub enum TargetsCmd {
 
 #[derive(Subcommand)]
 pub enum AliasCmd {
+    /// Store a catc command line under a short name.
     Add {
         name: String,
         /// The full `catc` command line, e.g. `nav https://x --for 5m`.
         command: Vec<String>,
     },
+    /// List stored aliases.
     List,
+    /// Run a stored alias by name.
     Run {
         name: String,
     },
+    /// Bulk-load aliases from a YAML file.
     Import {
         file: String,
     },
+    /// Bulk-save aliases to a YAML file.
     Export {
         file: String,
     },
@@ -212,10 +223,13 @@ pub enum AliasCmd {
 pub async fn run(cli: Cli) -> Result<()> {
     match cli.cmd {
         Cmd::Init { socks } => cmd_init(socks),
-        Cmd::AddStage { name } => cmd_add_stage(name),
-        Cmd::RemoveStage { name } => cmd_remove_stage(name),
-        Cmd::Activate(s) => cmd_set_active(s, true),
-        Cmd::Deactivate(s) => cmd_set_active(s, false),
+        Cmd::Stage { sub } => match sub {
+            StageCmd::Add { name } => cmd_add_stage(name),
+            StageCmd::Remove { name } => cmd_remove_stage(name),
+            StageCmd::Activate(s) => cmd_set_active(s, true),
+            StageCmd::Deactivate(s) => cmd_set_active(s, false),
+            StageCmd::List { probe } => cmd_targets_list(probe).await,
+        },
 
         Cmd::Pause(t) => cmd_send(t, Message::Pause).await,
         Cmd::Play(t) => cmd_send(t, Message::Play).await,
@@ -270,9 +284,6 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
         },
 
-        Cmd::Targets { sub } => match sub {
-            TargetsCmd::List { probe } => cmd_targets_list(probe).await,
-        },
         Cmd::Alias { sub } => match sub {
             AliasCmd::Add { name, command } => cmd_alias_add(name, command),
             AliasCmd::List => cmd_alias_list(),
