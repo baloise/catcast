@@ -86,14 +86,9 @@ pub enum Message {
         url: String,
         duration_secs: u64,
     },
-    /// Set or toggle manual mode. `on = Some(true|false)` is explicit;
-    /// `None` flips whatever the current value is on the stage side.
-    Manual {
-        on: Option<bool>,
-    },
     /// Step the rotation one slot backward (wraps from index 0 to the last
     /// entry). Useful for operators previewing a rotation manually. Works
-    /// regardless of pause/manual — bypasses the auto-advance gate.
+    /// regardless of pause mode — bypasses the auto-advance gate.
     Back,
     /// Step the rotation one slot forward (wraps from the last entry back to
     /// index 0). See [`Back`].

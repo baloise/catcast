@@ -48,13 +48,6 @@ pub enum Cmd {
         #[command(flatten)]
         targets: Targets,
     },
-    /// Set or toggle manual mode. Omit `on|off` to flip the current value.
-    Manual {
-        on_off: Option<OnOff>,
-        #[command(flatten)]
-        targets: Targets,
-    },
-
     Config {
         #[command(subcommand)]
         sub: ConfigCmd,
@@ -247,16 +240,6 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
             None => cmd_send(targets, Message::Nav { url }).await,
         },
-        Cmd::Manual { on_off, targets } => {
-            cmd_send(
-                targets,
-                Message::Manual {
-                    on: on_off.map(|v| matches!(v, OnOff::On)),
-                },
-            )
-            .await
-        }
-
         Cmd::Config { sub } => match sub {
             ConfigCmd::Import { file, targets } => cmd_config_import(file, targets).await,
             ConfigCmd::Export { targets } => {

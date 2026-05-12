@@ -120,7 +120,6 @@
       }
       .pill.paused { color: var(--warn); border-color: var(--warn); }
       .pill.playing { color: var(--ok); border-color: var(--ok); }
-      .pill.manual { color: var(--accent); border-color: var(--accent); }
       .pill.idle { color: var(--muted); border-color: var(--muted); }
       .autostart-state { color: var(--muted); }
       .autostart-state.installed { color: var(--ok); }
@@ -229,18 +228,14 @@
           else if (snap.connection === "down") dot.classList.add("down");
 
           const pill = document.getElementById("mode-pill");
-          pill.classList.remove("paused", "playing", "manual", "idle");
-          // Mode precedence: manual > idle (no config) > paused > playing.
-          let mode, text;
-          if (snap.state.manual) {
-            mode = "manual"; text = "Manual";
-          } else if (!snap.state.has_config || !snap.state.has_logic) {
-            mode = "idle"; text = "Idle (waiting for config)";
-          } else if (snap.state.paused) {
-            mode = "paused"; text = "Paused";
-          } else {
-            mode = "playing"; text = "Playing";
-          }
+          pill.classList.remove("paused", "playing", "idle");
+          // snap.state.mode is "playing" | "paused" | "idle" (catcast_core::Mode).
+          // Stages booting without config/logic stay idle until something is pushed.
+          const mode = snap.state.mode || "playing";
+          const text =
+            mode === "idle" ? (snap.state.has_config && snap.state.has_logic ? "Idle" : "Idle (waiting for config)") :
+            mode === "paused" ? "Paused" :
+            "Playing";
           pill.classList.add(mode);
           pill.textContent = text;
 

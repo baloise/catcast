@@ -17,6 +17,7 @@
 
 use crate::logic::{LogicHandle, Plan};
 use catcast_core::config::parse_cron;
+use catcast_core::Mode;
 use chrono::{DateTime, Utc};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -32,14 +33,14 @@ pub enum Cmd {
     TimedNav { url: String, secs: u64 },
     /// Navigate to a URL and stay there until something else changes.
     Nav(String),
-    /// Freeze the current entry.
+    /// Freeze rotation on the currently-shown URL.
     Pause,
-    /// Resume rotation.
+    /// Resume rotation. Equivalent to `SetMode(Playing)`.
     Play,
-    /// Enter/exit manual mode. Manual mode suppresses rotation advances.
-    Manual(bool),
+    /// Kiosk goes idle (about page). Suppresses rotation advances.
+    Idle,
     /// Step the rotation by `delta` (typically -1 / +1). Bypasses pause /
-    /// manual / one-shot. The oneshot reply carries the URL of the new slot,
+    /// idle / one-shot. The oneshot reply carries the URL of the new slot,
     /// or `None` if the rotation is empty.
     Step {
         delta: i32,
@@ -55,8 +56,7 @@ pub enum Cmd {
 /// broadcast" path.
 pub trait Events: Send + Sync + 'static {
     fn on_url_change(&self, url: &str);
-    fn on_pause_change(&self, paused: bool);
-    fn on_manual_change(&self, manual: bool);
+    fn on_mode_change(&self, mode: Mode);
 }
 
 /// Minimal no-op events sink. Useful for tests; the real binary wires this
@@ -65,18 +65,7 @@ pub trait Events: Send + Sync + 'static {
 pub struct NoopEvents;
 impl Events for NoopEvents {
     fn on_url_change(&self, _url: &str) {}
-    fn on_pause_change(&self, _paused: bool) {}
-    fn on_manual_change(&self, _manual: bool) {}
-}
-
-/// Per-boot initial runtime flags. Used by [`spawn_with_rx`] so the
-/// scheduler's `paused` / `manual` start in sync with whatever was loaded
-/// from `state.json`. Defaults to the same "fresh stage" values [`Runtime`]
-/// would pick on its own, so tests that don't care can ignore this.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct InitialFlags {
-    pub paused: bool,
-    pub manual: bool,
+    fn on_mode_change(&self, _mode: Mode) {}
 }
 
 /// Spawn the scheduler task. Returns the command sender; drop it to stop.
@@ -90,7 +79,7 @@ pub fn spawn(
     events: Arc<dyn Events>,
 ) -> mpsc::Sender<Cmd> {
     let (tx, rx) = mpsc::channel(32);
-    spawn_with_rx(rx, plan, InitialFlags::default(), logic, events);
+    spawn_with_rx(rx, plan, logic, events);
     tx
 }
 
@@ -98,14 +87,17 @@ pub fn spawn(
 /// so it can hand the matching sender to Tauri's managed state before the
 /// scheduler is wired up — otherwise the about page may invoke commands
 /// before `app.manage()` has been called.
+///
+/// The scheduler always boots in `Mode::Playing`; the operator's
+/// persisted mode is ignored at startup (a stage that was left in `Paused`
+/// or `Idle` recovers cleanly on next launch).
 pub fn spawn_with_rx(
     rx: mpsc::Receiver<Cmd>,
     plan: Plan,
-    flags: InitialFlags,
     logic: Option<Arc<Mutex<Option<LogicHandle>>>>,
     events: Arc<dyn Events>,
 ) {
-    tokio::spawn(run(rx, plan, flags, logic, events));
+    tokio::spawn(run(rx, plan, logic, events));
 }
 
 /// Internal state held by the scheduler task.
@@ -114,8 +106,7 @@ struct Runtime {
     /// Index into `plan.rotation`. Always within bounds when rotation
     /// non-empty; ignored when empty.
     idx: usize,
-    paused: bool,
-    manual: bool,
+    mode: Mode,
     /// If `Some`, we're currently displaying a one-shot URL until this
     /// instant; afterwards we return to rotation.
     one_shot_until: Option<Instant>,
@@ -125,12 +116,11 @@ struct Runtime {
 }
 
 impl Runtime {
-    fn new(plan: Plan, flags: InitialFlags) -> Self {
+    fn new(plan: Plan) -> Self {
         Self {
             plan,
             idx: 0,
-            paused: flags.paused,
-            manual: flags.manual,
+            mode: Mode::Playing,
             one_shot_until: None,
             last_url: None,
         }
@@ -140,11 +130,10 @@ impl Runtime {
 async fn run(
     mut rx: mpsc::Receiver<Cmd>,
     plan: Plan,
-    flags: InitialFlags,
     logic: Option<Arc<Mutex<Option<LogicHandle>>>>,
     events: Arc<dyn Events>,
 ) {
-    let mut rt = Runtime::new(plan, flags);
+    let mut rt = Runtime::new(plan);
 
     // The current rotation "slot" started here. Used to compute remaining
     // time when an interrupt (NavTimed, cron) lands mid-slot.
@@ -188,32 +177,28 @@ async fn run(
                     }
                     Cmd::TimedNav { url, secs } => {
                         rt.one_shot_until = Some(Instant::now() + Duration::from_secs(secs.max(1)));
+                        // Timed nav implies Playing — when the timer expires
+                        // rotation resumes; staying Paused would be a UX trap.
+                        set_mode(&mut rt, Mode::Playing, &events, &mut slot_started, &mut slot_duration);
                         emit_url(&mut rt, &url, &events);
                     }
                     Cmd::Nav(url) => {
                         rt.one_shot_until = None;
+                        set_mode(&mut rt, Mode::Playing, &events, &mut slot_started, &mut slot_duration);
                         emit_url(&mut rt, &url, &events);
                     }
                     Cmd::Pause => {
-                        if !rt.paused {
-                            rt.paused = true;
-                            events.on_pause_change(true);
-                        }
+                        set_mode(&mut rt, Mode::Paused, &events, &mut slot_started, &mut slot_duration);
                     }
                     Cmd::Play => {
-                        if rt.paused {
-                            rt.paused = false;
-                            events.on_pause_change(false);
-                            // Reset slot so we don't immediately fall through.
-                            slot_started = Instant::now();
-                            slot_duration = current_slot_duration(&rt);
-                        }
+                        set_mode(&mut rt, Mode::Playing, &events, &mut slot_started, &mut slot_duration);
+                        // Re-announce the current rotation URL so the kiosk
+                        // moves off about (when leaving Idle) or off whatever
+                        // it was held on.
+                        announce_current(&rt, &events);
                     }
-                    Cmd::Manual(on) => {
-                        if rt.manual != on {
-                            rt.manual = on;
-                            events.on_manual_change(on);
-                        }
+                    Cmd::Idle => {
+                        set_mode(&mut rt, Mode::Idle, &events, &mut slot_started, &mut slot_duration);
                     }
                     Cmd::Step { delta, reply } => {
                         let new_url = if rt.plan.rotation.is_empty() {
@@ -225,6 +210,11 @@ async fn run(
                             let n = rt.plan.rotation.len() as i32;
                             rt.idx = (rt.idx as i32 + delta).rem_euclid(n) as usize;
                             rt.one_shot_until = None;
+                            // Stepping from Idle implicitly resumes playing —
+                            // operator wants to see the slot, not stay on about.
+                            if rt.mode == Mode::Idle {
+                                set_mode(&mut rt, Mode::Playing, &events, &mut slot_started, &mut slot_duration);
+                            }
                             slot_started = Instant::now();
                             slot_duration = current_slot_duration(&rt);
                             let u = rt.plan.rotation[rt.idx].url.clone();
@@ -262,8 +252,9 @@ async fn run(
                         continue;
                     }
                 }
-                // Otherwise: advance rotation (unless paused / manual / one-shot).
-                if !rt.paused && !rt.manual && rt.one_shot_until.is_none()
+                // Otherwise: advance rotation (unless not playing / one-shot / empty).
+                if rt.mode == Mode::Playing
+                    && rt.one_shot_until.is_none()
                     && !rt.plan.rotation.is_empty()
                 {
                     rt.idx = (rt.idx + 1) % rt.plan.rotation.len();
@@ -279,6 +270,27 @@ async fn run(
             else => break,
         }
     }
+}
+
+/// Transition the runtime's mode and emit the event iff it actually changed.
+/// Resets slot timing on transitions into `Playing` so we don't immediately
+/// fall through to the next entry.
+fn set_mode(
+    rt: &mut Runtime,
+    new: Mode,
+    events: &Arc<dyn Events>,
+    slot_started: &mut Instant,
+    slot_duration: &mut Duration,
+) {
+    if rt.mode == new {
+        return;
+    }
+    rt.mode = new;
+    if new == Mode::Playing {
+        *slot_started = Instant::now();
+        *slot_duration = current_slot_duration(rt);
+    }
+    events.on_mode_change(new);
 }
 
 fn apply_nav_action(
@@ -298,20 +310,8 @@ fn apply_nav_action(
             rt.one_shot_until = Some(Instant::now() + Duration::from_secs(secs.max(1)));
             emit_url(rt, &url, events);
         }
-        NavAction::Pause => {
-            if !rt.paused {
-                rt.paused = true;
-                events.on_pause_change(true);
-            }
-        }
-        NavAction::Play => {
-            if rt.paused {
-                rt.paused = false;
-                events.on_pause_change(false);
-                *slot_started = Instant::now();
-                *slot_duration = current_slot_duration(rt);
-            }
-        }
+        NavAction::Pause => set_mode(rt, Mode::Paused, events, slot_started, slot_duration),
+        NavAction::Play => set_mode(rt, Mode::Playing, events, slot_started, slot_duration),
     }
 }
 
@@ -392,18 +392,14 @@ mod tests {
     #[derive(Default)]
     struct Collector {
         urls: StdMutex<Vec<String>>,
-        paused: StdMutex<Vec<bool>>,
-        manual: StdMutex<Vec<bool>>,
+        modes: StdMutex<Vec<Mode>>,
     }
     impl Events for Collector {
         fn on_url_change(&self, url: &str) {
             self.urls.lock().unwrap().push(url.to_string());
         }
-        fn on_pause_change(&self, paused: bool) {
-            self.paused.lock().unwrap().push(paused);
-        }
-        fn on_manual_change(&self, manual: bool) {
-            self.manual.lock().unwrap().push(manual);
+        fn on_mode_change(&self, mode: Mode) {
+            self.modes.lock().unwrap().push(mode);
         }
     }
 
@@ -495,7 +491,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn pause_play_emit_events() {
+    async fn pause_play_emit_mode_events() {
         let coll = Arc::new(Collector::default());
         let tx = spawn(plan_two_urls(), None, coll.clone());
         tokio::time::advance(Duration::from_millis(50)).await;
@@ -504,8 +500,31 @@ mod tests {
         tx.send(Cmd::Play).await.unwrap();
         tokio::time::advance(Duration::from_millis(50)).await;
         tokio::task::yield_now().await;
-        let paused = coll.paused.lock().unwrap().clone();
-        assert_eq!(paused, vec![true, false]);
+        let modes = coll.modes.lock().unwrap().clone();
+        assert_eq!(modes, vec![Mode::Paused, Mode::Playing]);
+        let _ = tx.send(Cmd::Shutdown).await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn idle_then_play_re_announces_url() {
+        let coll = Arc::new(Collector::default());
+        let tx = spawn(plan_two_urls(), None, coll.clone());
+        tokio::time::advance(Duration::from_millis(50)).await;
+        tx.send(Cmd::Idle).await.unwrap();
+        tokio::time::advance(Duration::from_millis(50)).await;
+        tx.send(Cmd::Play).await.unwrap();
+        tokio::time::advance(Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
+        let modes = coll.modes.lock().unwrap().clone();
+        assert_eq!(modes, vec![Mode::Idle, Mode::Playing]);
+        // Play after Idle should re-emit the current rotation URL so the
+        // kiosk moves off about.
+        let urls = coll.urls.lock().unwrap().clone();
+        let after_play_count = urls.iter().filter(|u| u.as_str() == "https://a/").count();
+        assert!(
+            after_play_count >= 2,
+            "expected re-announce on Play: {urls:?}"
+        );
         let _ = tx.send(Cmd::Shutdown).await;
     }
 }

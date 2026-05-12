@@ -273,22 +273,18 @@ async fn bootstrap(
         out: Arc::clone(&out_tx),
     });
 
-    // Carry the persisted `paused` / `manual` flags into the scheduler so
-    // rt.{paused,manual} match `shared.state.{paused,manual}` from the very
-    // first tick. Without this, a stage that was in `manual on` mode when it
-    // last exited boots with rt.manual=false but state.manual=true; the
-    // first `catc manual off` is a scheduler no-op and Reply-by-state lies.
-    let initial_flags = {
-        let sh = shared.lock().unwrap();
-        scheduler::InitialFlags {
-            paused: sh.state.paused,
-            manual: sh.state.manual,
-        }
-    };
+    // Scheduler always boots in Playing; persisted mode is intentionally
+    // ignored. A stage left in Paused or Idle when it last exited recovers
+    // cleanly. The persisted mode in state.json mostly reflects the most-
+    // recent operator action — useful for the about page on next launch but
+    // not as a runtime resume target.
+    {
+        let mut sh = shared.lock().unwrap();
+        sh.state.mode = catcast_core::Mode::Playing;
+    }
     scheduler::spawn_with_rx(
         sched_rx,
         initial_plan,
-        initial_flags,
         Some(Arc::clone(&logic_handle)),
         events.clone(),
     );
@@ -372,9 +368,9 @@ impl scheduler::Events for SchedEvents {
         steer_webview(&self.app, url);
         about::emit_state(&self.app, WINDOW_LABEL);
     }
-    fn on_pause_change(&self, paused: bool) {
+    fn on_mode_change(&self, mode: catcast_core::Mode) {
         let mut sh = self.shared.lock().unwrap();
-        sh.state.paused = paused;
+        sh.state.mode = mode;
         sh.state.since = chrono::Utc::now().timestamp_millis();
         let snap = sh.state.clone();
         drop(sh);
@@ -382,25 +378,36 @@ impl scheduler::Events for SchedEvents {
         if let Err(e) = persist::save_state(&snap) {
             eprintln!("catstage: state save failed: {e:#}");
         }
-        about::emit_state(&self.app, WINDOW_LABEL);
-    }
-    fn on_manual_change(&self, manual: bool) {
-        let mut sh = self.shared.lock().unwrap();
-        sh.state.manual = manual;
-        sh.state.since = chrono::Utc::now().timestamp_millis();
-        let snap = sh.state.clone();
-        drop(sh);
-        broadcast(&self.out, Message::State(snap.clone()));
-        if let Err(e) = persist::save_state(&snap) {
-            eprintln!("catstage: state save failed: {e:#}");
+        // Idle transitions need the kiosk on the about page; transitions
+        // *off* idle re-announce the rotation URL via the scheduler's
+        // Cmd::Play handler. We only have to handle the Idle direction
+        // here because non-idle modes don't dictate a particular URL.
+        if mode == catcast_core::Mode::Idle {
+            navigate_to_about(&self.app);
         }
         about::emit_state(&self.app, WINDOW_LABEL);
     }
 }
 
-/// Drive the kiosk webview to `url` unless we're in manual mode (where the
-/// operator owns the URL bar) or unless the URL starts with `about:`
-/// (handled by the URI scheme).
+/// Send the kiosk window back to the bundled about page. Used by mode
+/// transitions into `Idle`, and by the `NavAbout` dispatch arm (which also
+/// emits a Reply). Bypasses `steer_webview`'s gating — Idle *is* the gate
+/// now.
+fn navigate_to_about(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
+        return;
+    };
+    let Some(about_url) = app.try_state::<about::AboutUrl>() else {
+        return;
+    };
+    if let Err(e) = window.navigate(about_url.0.clone()) {
+        eprintln!("catstage: navigate(about) failed: {e}");
+    }
+}
+
+/// Drive the kiosk webview to `url`. Skipped when the stage is `Idle`
+/// (kiosk should stay on about) so rotation index advances under the hood
+/// don't yank the operator off the admin page.
 fn steer_webview(app: &tauri::AppHandle, url: &str) {
     let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
         return;
@@ -408,7 +415,7 @@ fn steer_webview(app: &tauri::AppHandle, url: &str) {
     let Some(ctx) = app.try_state::<TauriCtx>() else {
         return;
     };
-    if ctx.shared.lock().unwrap().state.manual {
+    if ctx.shared.lock().unwrap().state.mode == catcast_core::Mode::Idle {
         return;
     }
     if let Ok(parsed) = tauri::Url::parse(url) {
@@ -441,8 +448,17 @@ async fn dispatch(
     // broadcast (GetState) return None.
     let outcome: Option<Result<String, String>> = match msg {
         Message::Pause => {
-            let _ = sched.send(Cmd::Pause).await;
-            Some(Ok(decorate("paused", &shared)))
+            // Pausing from Idle is a no-op trap — there's no current URL to
+            // freeze on. Surface the real reason rather than silently
+            // accepting and looking stuck.
+            if shared.lock().unwrap().state.mode == catcast_core::Mode::Idle {
+                Some(Err(
+                    "nothing to pause — stage is on the about page (run `catc play`)".into(),
+                ))
+            } else {
+                let _ = sched.send(Cmd::Pause).await;
+                Some(Ok(decorate("paused", &shared)))
+            }
         }
         Message::Play => {
             let _ = sched.send(Cmd::Play).await;
@@ -465,19 +481,6 @@ async fn dispatch(
                 .await;
             Some(Ok(m))
         }
-        Message::Manual { on } => {
-            // None = toggle: read the current flag from Shared and flip it.
-            let new_on = on.unwrap_or_else(|| !shared.lock().unwrap().state.manual);
-            let _ = sched.send(Cmd::Manual(new_on)).await;
-            // Manual-on parks the kiosk on the about page regardless of what's
-            // loaded, so don't decorate it. Manual-off resumes whatever the
-            // scheduler has — same context as play/pause.
-            Some(Ok(if new_on {
-                "manual on".into()
-            } else {
-                decorate("manual off", &shared)
-            }))
-        }
         Message::SetConfig { yaml } => {
             Some(set_config(yaml, &shared, &sched, &logic_handle, &app).await)
         }
@@ -499,24 +502,13 @@ async fn dispatch(
             broadcast(&out, Message::LogicData { rhai });
             None
         }
-        Message::NavAbout => Some(
-            match (
-                app.get_webview_window(WINDOW_LABEL),
-                app.try_state::<about::AboutUrl>(),
-            ) {
-                (Some(w), Some(about_url)) => {
-                    let url = about_url.0.clone();
-                    // Bypass steer_webview's manual-mode gate: NavAbout is an
-                    // operator override that should work regardless of mode.
-                    match w.navigate(url.clone()) {
-                        Ok(()) => Ok(format!("navigated to {url}")),
-                        Err(e) => Err(format!("navigate failed: {e}")),
-                    }
-                }
-                (None, _) => Err("no kiosk window".into()),
-                (_, None) => Err("AboutUrl not captured yet".into()),
-            },
-        ),
+        Message::NavAbout => {
+            // The scheduler flips mode → Idle and the on_mode_change handler
+            // does the actual `window.navigate(about_url)`. Dispatch just
+            // needs to send the command and craft the reply.
+            let _ = sched.send(Cmd::Idle).await;
+            Some(Ok("on about".into()))
+        }
         Message::AutostartInstall => Some(match app.try_state::<crate::about::TauriCtx>() {
             Some(ctx) => {
                 let socks = ctx.inner().broker_url.clone();

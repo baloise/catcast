@@ -98,11 +98,13 @@ cargo run -p catc -- targets list --probe
 cargo run -p catc -- logic  import default-logic/default.rhai
 cargo run -p catc -- config import examples/config.yaml
 
-# Drive the stage:
-cargo run -p catc -- pause                                   # halt rotation
-cargo run -p catc -- play                                    # resume
-cargo run -p catc -- manual on                               # enter manual mode
-cargo run -p catc -- nav https://example.com --for 1m        # timed interrupt
+# Drive the stage. Three modes: Playing / Paused / Idle.
+cargo run -p catc -- pause                                   # freeze on current URL (Paused)
+cargo run -p catc -- play                                    # resume rotation (Playing)
+cargo run -p catc -- about                                   # park on about page (Idle)
+cargo run -p catc -- forward                                 # step one slot forward
+cargo run -p catc -- back                                    # step one slot backward
+cargo run -p catc -- nav https://example.com --for 1m        # timed interrupt, auto-resume
 cargo run -p catc -- fullscreen on                           # window state
 cargo run -p catc -- devtools on                             # remote DevTools
 

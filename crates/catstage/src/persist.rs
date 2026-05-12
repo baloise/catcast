@@ -11,7 +11,7 @@
 //! `anyhow::Error` and the caller decides whether to log+continue.
 
 use anyhow::{Context, Result};
-use catcast_core::State;
+use catcast_core::{Mode, State};
 use directories::ProjectDirs;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -57,8 +57,48 @@ pub fn load_state() -> Result<Option<State>> {
     let Some(text) = read_if_exists(&state_path()?)? else {
         return Ok(None);
     };
-    let state: State = serde_json::from_str(&text).context("parsing state.json")?;
+    // Parse loosely as serde_json::Value so we can detect the v1 shape
+    // (paused/manual booleans) and migrate it to v2's `mode` enum before
+    // strict-deserializing into State. Old stages that wrote `state.json`
+    // before this commit produced schema=1; new writes are schema=2.
+    let v: serde_json::Value = serde_json::from_str(&text).context("parsing state.json as JSON")?;
+    let migrated = migrate_state_v1_to_v2(v);
+    let state: State = serde_json::from_value(migrated).context("parsing state.json into State")?;
     Ok(Some(state))
+}
+
+/// If `v` looks like a v1 state.json (no `mode` key; has legacy `paused` /
+/// `manual` booleans), rewrite it into the v2 shape. v2-and-newer pass
+/// through untouched.
+fn migrate_state_v1_to_v2(mut v: serde_json::Value) -> serde_json::Value {
+    let obj = match v.as_object_mut() {
+        Some(o) => o,
+        None => return v,
+    };
+    if obj.contains_key("mode") {
+        return v;
+    }
+    let manual = obj
+        .remove("manual")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
+    let paused = obj
+        .remove("paused")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
+    let mode = if manual {
+        Mode::Idle
+    } else if paused {
+        Mode::Paused
+    } else {
+        Mode::Playing
+    };
+    obj.insert("mode".into(), serde_json::to_value(mode).unwrap());
+    obj.insert(
+        "schema".into(),
+        serde_json::to_value(catcast_core::state::CURRENT_STATE_SCHEMA).unwrap(),
+    );
+    v
 }
 
 fn write_atomic(p: &Path, content: &str) -> Result<()> {
@@ -100,6 +140,61 @@ mod tests {
         std::fs::write(&path, s).unwrap();
         let read: State = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(read.name, "kitchen");
+    }
+
+    #[test]
+    fn migrates_v1_paused_to_mode_paused() {
+        let v1 = serde_json::json!({
+            "schema": 1,
+            "name": "kitchen",
+            "version": "0.0.1",
+            "current_url": "https://example.com",
+            "paused": true,
+            "manual": false,
+            "has_logic": true,
+            "has_config": true,
+            "since": 0,
+        });
+        let migrated = migrate_state_v1_to_v2(v1);
+        let s: State = serde_json::from_value(migrated).unwrap();
+        assert_eq!(s.mode, Mode::Paused);
+        assert_eq!(s.schema, catcast_core::state::CURRENT_STATE_SCHEMA);
+    }
+
+    #[test]
+    fn migrates_v1_manual_to_mode_idle() {
+        let v1 = serde_json::json!({
+            "schema": 1,
+            "name": "kitchen",
+            "version": "0.0.1",
+            "current_url": null,
+            "paused": false,
+            "manual": true,
+            "has_logic": false,
+            "has_config": false,
+            "since": 0,
+        });
+        let migrated = migrate_state_v1_to_v2(v1);
+        let s: State = serde_json::from_value(migrated).unwrap();
+        assert_eq!(s.mode, Mode::Idle);
+    }
+
+    #[test]
+    fn migrates_v1_neither_to_mode_playing() {
+        let v1 = serde_json::json!({
+            "schema": 1,
+            "name": "kitchen",
+            "version": "0.0.1",
+            "current_url": null,
+            "paused": false,
+            "manual": false,
+            "has_logic": false,
+            "has_config": false,
+            "since": 0,
+        });
+        let migrated = migrate_state_v1_to_v2(v1);
+        let s: State = serde_json::from_value(migrated).unwrap();
+        assert_eq!(s.mode, Mode::Playing);
     }
 
     fn tempdir() -> PathBuf {
