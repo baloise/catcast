@@ -62,6 +62,16 @@ impl Events for NoopEvents {
     fn on_manual_change(&self, _manual: bool) {}
 }
 
+/// Per-boot initial runtime flags. Used by [`spawn_with_rx`] so the
+/// scheduler's `paused` / `manual` start in sync with whatever was loaded
+/// from `state.json`. Defaults to the same "fresh stage" values [`Runtime`]
+/// would pick on its own, so tests that don't care can ignore this.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct InitialFlags {
+    pub paused: bool,
+    pub manual: bool,
+}
+
 /// Spawn the scheduler task. Returns the command sender; drop it to stop.
 /// Kept as a convenience for tests / future single-step callers; the binary
 /// uses [`spawn_with_rx`] so the tx half can be in `app.manage()`-d state
@@ -73,7 +83,7 @@ pub fn spawn(
     events: Arc<dyn Events>,
 ) -> mpsc::Sender<Cmd> {
     let (tx, rx) = mpsc::channel(32);
-    spawn_with_rx(rx, plan, logic, events);
+    spawn_with_rx(rx, plan, InitialFlags::default(), logic, events);
     tx
 }
 
@@ -84,10 +94,11 @@ pub fn spawn(
 pub fn spawn_with_rx(
     rx: mpsc::Receiver<Cmd>,
     plan: Plan,
+    flags: InitialFlags,
     logic: Option<Arc<Mutex<Option<LogicHandle>>>>,
     events: Arc<dyn Events>,
 ) {
-    tokio::spawn(run(rx, plan, logic, events));
+    tokio::spawn(run(rx, plan, flags, logic, events));
 }
 
 /// Internal state held by the scheduler task.
@@ -107,12 +118,12 @@ struct Runtime {
 }
 
 impl Runtime {
-    fn new(plan: Plan) -> Self {
+    fn new(plan: Plan, flags: InitialFlags) -> Self {
         Self {
             plan,
             idx: 0,
-            paused: false,
-            manual: false,
+            paused: flags.paused,
+            manual: flags.manual,
             one_shot_until: None,
             last_url: None,
         }
@@ -122,10 +133,11 @@ impl Runtime {
 async fn run(
     mut rx: mpsc::Receiver<Cmd>,
     plan: Plan,
+    flags: InitialFlags,
     logic: Option<Arc<Mutex<Option<LogicHandle>>>>,
     events: Arc<dyn Events>,
 ) {
-    let mut rt = Runtime::new(plan);
+    let mut rt = Runtime::new(plan, flags);
 
     // The current rotation "slot" started here. Used to compute remaining
     // time when an interrupt (NavTimed, cron) lands mid-slot.

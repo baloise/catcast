@@ -273,9 +273,22 @@ async fn bootstrap(
         out: Arc::clone(&out_tx),
     });
 
+    // Carry the persisted `paused` / `manual` flags into the scheduler so
+    // rt.{paused,manual} match `shared.state.{paused,manual}` from the very
+    // first tick. Without this, a stage that was in `manual on` mode when it
+    // last exited boots with rt.manual=false but state.manual=true; the
+    // first `catc manual off` is a scheduler no-op and Reply-by-state lies.
+    let initial_flags = {
+        let sh = shared.lock().unwrap();
+        scheduler::InitialFlags {
+            paused: sh.state.paused,
+            manual: sh.state.manual,
+        }
+    };
     scheduler::spawn_with_rx(
         sched_rx,
         initial_plan,
+        initial_flags,
         Some(Arc::clone(&logic_handle)),
         events.clone(),
     );
@@ -365,7 +378,10 @@ impl scheduler::Events for SchedEvents {
         sh.state.since = chrono::Utc::now().timestamp_millis();
         let snap = sh.state.clone();
         drop(sh);
-        broadcast(&self.out, Message::State(snap));
+        broadcast(&self.out, Message::State(snap.clone()));
+        if let Err(e) = persist::save_state(&snap) {
+            eprintln!("catstage: state save failed: {e:#}");
+        }
         about::emit_state(&self.app, WINDOW_LABEL);
     }
     fn on_manual_change(&self, manual: bool) {
@@ -374,7 +390,10 @@ impl scheduler::Events for SchedEvents {
         sh.state.since = chrono::Utc::now().timestamp_millis();
         let snap = sh.state.clone();
         drop(sh);
-        broadcast(&self.out, Message::State(snap));
+        broadcast(&self.out, Message::State(snap.clone()));
+        if let Err(e) = persist::save_state(&snap) {
+            eprintln!("catstage: state save failed: {e:#}");
+        }
         about::emit_state(&self.app, WINDOW_LABEL);
     }
 }
