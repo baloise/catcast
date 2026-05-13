@@ -1,7 +1,18 @@
+<table>
+<tr>
+<td>
+
 # CatCast
 
 A tiny digital signage stack for places where you can't install software as
 admin. Three pieces:
+
+</td>
+<td valign="top" align="right">
+<img src="CastCast_logo_plain.svg" alt="CatCast logo" width="107">
+</td>
+</tr>
+</table>
 
 - **catstage** — fullscreen viewer (Tauri / WebView2). Drop the EXE on a
   machine, point it at a broker, walk away.

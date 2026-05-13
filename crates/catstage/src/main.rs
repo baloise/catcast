@@ -123,7 +123,10 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    eprintln!("catstage v{} starting as {name}", env!("CARGO_PKG_VERSION"),);
+    eprintln!(
+        "😼🎬 catstage v{} starting as {name}",
+        env!("CARGO_PKG_VERSION"),
+    );
 
     let broker_url = args.socks.clone();
     let stage_name = name.clone();

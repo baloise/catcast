@@ -101,7 +101,7 @@ async fn main() {
         .route("/r/{room}", get(ws_upgrade))
         .with_state(rooms);
 
-    tracing::info!("catsocks listening on ws://{}/r/<room>", args.bind);
+    tracing::info!("😼🧦 catsocks listening on ws://{}/r/<room>", args.bind);
     let listener = match tokio::net::TcpListener::bind(args.bind).await {
         Ok(listener) => listener,
         Err(err) if err.kind() == ErrorKind::AddrInUse => {
