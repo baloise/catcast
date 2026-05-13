@@ -102,6 +102,11 @@ async fn main() {
         .with_state(rooms);
 
     tracing::info!("😼🧦 catsocks listening on ws://{}/r/<room>", args.bind);
+    tracing::info!(
+        "To stop, press Ctrl+C or run with --bind <host:port> to choose a different port."
+    );
+    tracing::info!("This implementation is intended for local development only;");
+    tracing::info!("is not designed to be secure or performant for production use.");
     let listener = match tokio::net::TcpListener::bind(args.bind).await {
         Ok(listener) => listener,
         Err(err) if err.kind() == ErrorKind::AddrInUse => {
