@@ -67,6 +67,11 @@ struct Args {
     #[arg(long)]
     name: Option<String>,
 
+    /// Monitor index to use on startup (1-based: 1 = first monitor).
+    /// Invalid values fall back to the primary monitor.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    screen: Option<u32>,
+
     /// Drop a Startup-folder shortcut so this stage launches at login,
     /// then exit. (The catcast://about wizard does the same thing
     /// interactively.)
@@ -112,11 +117,13 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
     let name = args.name.clone().unwrap_or_else(default_name);
+    let screen = args.screen;
 
     if args.install_autostart {
         if let Some(path) = autostart::install(&autostart::AutostartArgs {
             socks: args.socks.clone(),
             name: args.name.clone(),
+            screen,
         })? {
             eprintln!("catstage: autostart installed at {}", path.display());
         }
@@ -163,6 +170,9 @@ fn main() -> Result<()> {
             // on Windows) so hotkey commands can navigate back to it later
             // without hard-coding a platform-specific URL.
             if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
+                if let Some(screen_num) = screen {
+                    position_window_on_screen(&window, screen_num);
+                }
                 let _ = window.set_fullscreen(true);
                 if let Ok(url) = window.url() {
                     app.manage(about::AboutUrl(url));
@@ -197,6 +207,7 @@ fn main() -> Result<()> {
                 broker_url: broker_url.clone(),
                 sched_tx: sched_tx.clone(),
                 stage_name: stage_name.clone(),
+                screen,
             });
 
             let handle = app.handle().clone();
@@ -344,6 +355,48 @@ async fn bootstrap(
 fn default_name() -> String {
     let raw = gethostname::gethostname();
     raw.to_string_lossy().to_string()
+}
+
+fn position_window_on_screen(window: &tauri::WebviewWindow, screen_num: u32) {
+    let requested_idx = screen_num.saturating_sub(1) as usize;
+
+    let target = match window.available_monitors() {
+        Ok(monitors) => {
+            if let Some(monitor) = monitors.get(requested_idx) {
+                Some(monitor.clone())
+            } else {
+                eprintln!(
+                    "catstage: --screen {} unavailable ({} monitor(s)); falling back to primary",
+                    screen_num,
+                    monitors.len()
+                );
+                match window.primary_monitor() {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!("catstage: primary_monitor() failed: {e}");
+                        None
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("catstage: available_monitors() failed: {e}");
+            match window.primary_monitor() {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("catstage: primary_monitor() failed: {e}");
+                    None
+                }
+            }
+        }
+    };
+
+    if let Some(monitor) = target {
+        let _ = window.set_fullscreen(false);
+        if let Err(e) = window.set_position(monitor.position().to_owned()) {
+            eprintln!("catstage: set_position() failed: {e}");
+        }
+    }
 }
 
 struct SchedEvents {
@@ -521,7 +574,12 @@ async fn dispatch(
             Some(ctx) => {
                 let socks = ctx.inner().broker_url.clone();
                 let name = Some(ctx.inner().stage_name.clone());
-                let res = match autostart::install(&autostart::AutostartArgs { socks, name }) {
+                let screen = ctx.inner().screen;
+                let res = match autostart::install(&autostart::AutostartArgs {
+                    socks,
+                    name,
+                    screen,
+                }) {
                     Ok(Some(p)) => Ok(format!("installed at {}", p.display())),
                     Ok(None) => Ok("no-op on this OS".into()),
                     Err(e) => Err(format!("install failed: {e:#}")),

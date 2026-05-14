@@ -40,6 +40,7 @@ pub struct TauriCtx {
     pub broker_url: String,
     pub sched_tx: mpsc::Sender<scheduler::Cmd>,
     pub stage_name: String,
+    pub screen: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
