@@ -157,15 +157,15 @@ pub async fn enter_idle(ctx: tauri::State<'_, TauriCtx>) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-    /// Resume scheduler playback from the about page. Bound to the page-local
-    /// F2 shortcut so an operator can leave Idle without needing a separate CLI.
-    #[tauri::command]
-    pub async fn enter_play(ctx: tauri::State<'_, TauriCtx>) -> Result<(), String> {
-        ctx.sched_tx
+/// Resume scheduler playback from the about page. Bound to the page-local
+/// F2 shortcut so an operator can leave Idle without needing a separate CLI.
+#[tauri::command]
+pub async fn enter_play(ctx: tauri::State<'_, TauriCtx>) -> Result<(), String> {
+    ctx.sched_tx
         .send(scheduler::Cmd::Play)
         .await
         .map_err(|e| e.to_string())
-    }
+}
 
 /// Exit the catstage process when confirmed by the about page.
 #[tauri::command]

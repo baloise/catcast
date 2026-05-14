@@ -200,7 +200,9 @@ fn main() -> Result<()> {
         // unless `--offline`/`--url` is set, so reject the unsupported combo
         // here rather than producing a broken shortcut.
         let socks = args.socks.clone().ok_or_else(|| {
-            anyhow::anyhow!("--install-autostart requires --socks (offline autostart not supported)")
+            anyhow::anyhow!(
+                "--install-autostart requires --socks (offline autostart not supported)"
+            )
         })?;
         if let Some(path) = autostart::install(&autostart::AutostartArgs {
             socks,
