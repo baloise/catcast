@@ -221,10 +221,8 @@
 
       <section class="hints">
         Shortcuts: <kbd>F1</kbd> back to about (from any page), <kbd>Esc</kbd>
-        on this page to confirm and exit catstage. Everything
-        else — pause, play, manual on/off, nav, config import, autostart
-        install/uninstall, fullscreen, devtools, shutdown — is a
-        <code>catc</code> command.
+        on this page to confirm and exit catstage, <kbd>F2</kbd> to resume
+        play.
       </section>
     </div>
 
@@ -335,6 +333,11 @@
         // Allow local operators to exit from the about page with Esc.
         // We keep this page-local so Esc is not trapped on rotation URLs.
         document.addEventListener("keydown", (ev) => {
+          if (ev.key === "F2") {
+            ev.preventDefault();
+            invoke("enter_play").catch((e) => console.error(e));
+            return;
+          }
           if (ev.key !== "Escape") return;
           ev.preventDefault();
           const ok = window.confirm("Exit catstage now?");

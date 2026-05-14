@@ -200,6 +200,7 @@ fn main() -> Result<()> {
             about::get_snapshot,
             about::cmd_log,
             about::enter_idle,
+            about::enter_play,
             about::request_exit,
         ])
         .setup(move |app| {
