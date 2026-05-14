@@ -220,9 +220,10 @@
       </section>
 
       <section class="hints">
-        Shortcuts: <kbd>F1</kbd> back to about (from any page), <kbd>Esc</kbd>
-        on this page to confirm and exit catstage, <kbd>F2</kbd> to resume
-        play.
+        Shortcuts: <kbd>F1</kbd> back to about (from any page),
+        <kbd>Esc</kbd><kbd>Esc</kbd> on this page to exit catstage,
+        <kbd>F2</kbd> to resume play.
+        <div id="esc-hint" style="margin-top:4px;opacity:0;transition:opacity .15s ease;"></div>
       </section>
     </div>
 
@@ -332,6 +333,12 @@
 
         // Allow local operators to exit from the about page with Esc.
         // We keep this page-local so Esc is not trapped on rotation URLs.
+        // Double-press within 1.5s to confirm — `window.confirm()` is
+        // suppressed by WKWebView's default delegate on macOS (Tauri 2),
+        // so the previous single-press + native dialog flow appeared dead
+        // to operators. Two taps replaces the dialog without needing a
+        // Tauri dialog-plugin dependency.
+        let escArmedUntil = 0;
         document.addEventListener("keydown", (ev) => {
           if (ev.key === "F2") {
             ev.preventDefault();
@@ -340,9 +347,22 @@
           }
           if (ev.key !== "Escape") return;
           ev.preventDefault();
-          const ok = window.confirm("Exit catstage now?");
-          if (!ok) return;
-          invoke("request_exit").catch((e) => console.error(e));
+          const now = Date.now();
+          if (now < escArmedUntil) {
+            invoke("request_exit").catch((e) => console.error(e));
+            return;
+          }
+          escArmedUntil = now + 1500;
+          const hint = document.getElementById("esc-hint");
+          if (hint) {
+            hint.textContent = "Press Esc again within 1.5s to exit catstage.";
+            hint.style.opacity = "1";
+            setTimeout(() => {
+              if (Date.now() >= escArmedUntil) {
+                hint.style.opacity = "0";
+              }
+            }, 1500);
+          }
         }, true);
       })();
     </script>

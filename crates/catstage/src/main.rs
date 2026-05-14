@@ -427,6 +427,12 @@ async fn bootstrap(
             // Synthesize a one-entry rotation with effectively infinite slot
             // duration so the scheduler never advances past the single URL.
             // No persistence read/write — single-URL kiosks are ephemeral.
+            // Picked 100 years (not u64::MAX) because `Instant + Duration`
+            // overflows on absurd values and the scheduler would panic on
+            // its first `sleep_until` call. Rotation has length 1, so even
+            // if the slot ever did expire `(idx + 1) % 1 == 0` keeps us on
+            // the same URL.
+            const HUNDRED_YEARS_SECS: u64 = 60 * 60 * 24 * 365 * 100;
             {
                 let mut sh = shared.lock().unwrap();
                 sh.state.current_url = Some(url.clone());
@@ -435,7 +441,7 @@ async fn bootstrap(
                 default_secs: 1,
                 rotation: vec![crate::logic::RotationItem {
                     url: url.clone(),
-                    secs: u64::MAX,
+                    secs: HUNDRED_YEARS_SECS,
                 }],
                 cron: vec![],
                 one_shot: vec![],
