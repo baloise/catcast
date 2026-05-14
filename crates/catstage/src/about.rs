@@ -23,12 +23,24 @@ use tokio::sync::mpsc;
 use crate::scheduler;
 use crate::Shared as MainShared;
 
-/// The URL the window loaded on first paint — captured in `main.rs`'s setup
-/// callback and used by the on_page_load script (`build_escape_script` in
-/// main.rs) to bring the operator back to about from any external page.
-/// Platform-specific: typically `tauri://localhost/` on Linux/macOS or
-/// `http://tauri.localhost/` on Windows.
-pub struct AboutUrl(pub tauri::Url);
+/// Canonical in-memory target for "go to about" actions. Updated by `main.rs`
+/// when it sees a finished load of the bundled about page, and used by both
+/// the injected F1 handler and Rust-side Idle transitions.
+pub struct AboutUrl(pub Mutex<tauri::Url>);
+
+impl AboutUrl {
+    pub fn new(url: tauri::Url) -> Self {
+        Self(Mutex::new(url))
+    }
+
+    pub fn get(&self) -> tauri::Url {
+        self.0.lock().expect("AboutUrl poisoned").clone()
+    }
+
+    pub fn set(&self, url: tauri::Url) {
+        *self.0.lock().expect("AboutUrl poisoned") = url;
+    }
+}
 
 /// Shared runtime handles for the about page snapshot + the broker dispatch
 /// path. `make_snapshot` reads `shared`/`broker_url`/`stage_name`; the

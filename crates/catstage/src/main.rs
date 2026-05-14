@@ -30,6 +30,33 @@ use crate::logic::{LogicHandle, Plan};
 
 const WINDOW_LABEL: &str = "stage";
 
+fn bundled_about_fallback() -> tauri::Url {
+    #[cfg(target_os = "windows")]
+    let raw = "http://tauri.localhost/";
+    #[cfg(not(target_os = "windows"))]
+    let raw = "tauri://localhost/";
+
+    tauri::Url::parse(raw).expect("valid bundled about fallback URL")
+}
+
+fn is_blank_url(url: &tauri::Url) -> bool {
+    url.as_str().eq_ignore_ascii_case("about:blank")
+}
+
+fn is_bundled_about_url(url: &tauri::Url) -> bool {
+    if is_blank_url(url) {
+        return false;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return url.scheme() == "http" && url.domain() == Some("tauri.localhost");
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        return url.scheme() == "tauri";
+    }
+}
+
 /// Build the F1-only escape script for `WebviewWindow::on_page_load`.
 /// Pure JS, no IPC dependency — works on any page including external
 /// rotation URLs where Tauri doesn't inject `window.__TAURI__`. Operators
@@ -146,11 +173,18 @@ fn main() -> Result<()> {
         // (intentionally minimal) JS body.
         .on_page_load(|webview, payload| {
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
-                let about_url = webview
-                    .app_handle()
+                let app = webview.app_handle();
+                if let Some(state) = app.try_state::<about::AboutUrl>() {
+                    if let Ok(url) = webview.url() {
+                        if is_bundled_about_url(&url) {
+                            state.set(url);
+                        }
+                    }
+                }
+                let about_url = app
                     .try_state::<about::AboutUrl>()
-                    .map(|s| s.0.to_string())
-                    .unwrap_or_else(|| "tauri://localhost/".into());
+                    .map(|s| s.get().to_string())
+                    .unwrap_or_else(|| bundled_about_fallback().to_string());
                 let _ = webview.eval(build_escape_script(&about_url));
             }
         })
@@ -160,22 +194,28 @@ fn main() -> Result<()> {
             about::enter_idle,
         ])
         .setup(move |app| {
+            // Seed with a deterministic about URL so startup never records
+            // `about:blank` as the canonical return target.
+            app.manage(about::AboutUrl::new(bundled_about_fallback()));
+
             // Force fullscreen at runtime in addition to the config-time
             // request. WSLg / Wayland in particular tend to ignore the
             // config-time `fullscreen: true` because the compositor isn't
             // ready when the window is created.
             //
-            // Also capture the initial URL (the bundled index.html, served by
-            // Tauri at `tauri://localhost/` on Linux or `http://tauri.localhost/`
-            // on Windows) so hotkey commands can navigate back to it later
-            // without hard-coding a platform-specific URL.
+            // If setup-time URL probing already sees the bundled about page,
+            // store it. Ignore `about:blank` and non-bundled URLs.
             if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
                 if let Some(screen_num) = screen {
                     position_window_on_screen(&window, screen_num);
                 }
                 let _ = window.set_fullscreen(true);
                 if let Ok(url) = window.url() {
-                    app.manage(about::AboutUrl(url));
+                    if is_bundled_about_url(&url) {
+                        if let Some(state) = app.try_state::<about::AboutUrl>() {
+                            state.set(url);
+                        }
+                    }
                 }
                 // Opt-in: only open DevTools when --devtools was passed.
                 // Auto-opening on every run was intrusive for normal use.
@@ -458,10 +498,17 @@ fn navigate_to_about(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
         return;
     };
-    let Some(about_url) = app.try_state::<about::AboutUrl>() else {
-        return;
-    };
-    if let Err(e) = window.navigate(about_url.0.clone()) {
+    let mut target = app
+        .try_state::<about::AboutUrl>()
+        .map(|s| s.get())
+        .unwrap_or_else(bundled_about_fallback);
+    if !is_bundled_about_url(&target) {
+        target = bundled_about_fallback();
+        if let Some(state) = app.try_state::<about::AboutUrl>() {
+            state.set(target.clone());
+        }
+    }
+    if let Err(e) = window.navigate(target) {
         eprintln!("catstage: navigate(about) failed: {e}");
     }
 }
