@@ -149,6 +149,13 @@ pub async fn enter_idle(ctx: tauri::State<'_, TauriCtx>) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Exit the catstage process when confirmed by the about page.
+#[tauri::command]
+pub async fn request_exit(app: tauri::AppHandle) -> Result<(), String> {
+    app.exit(0);
+    Ok(())
+}
+
 /// Push the latest snapshot to the about page (via Tauri event). Called
 /// from `SchedEvents` (and from broker dispatch handlers in `main.rs`)
 /// after state changes.

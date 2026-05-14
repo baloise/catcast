@@ -220,7 +220,8 @@
       </section>
 
       <section class="hints">
-        Shortcut: <kbd>F1</kbd> back to about (from any page). Everything
+        Shortcuts: <kbd>F1</kbd> back to about (from any page), <kbd>Esc</kbd>
+        on this page to confirm and exit catstage. Everything
         else — pause, play, manual on/off, nav, config import, autostart
         install/uninstall, fullscreen, devtools, shutdown — is a
         <code>catc</code> command.
@@ -322,9 +323,24 @@
 
         if (initial.state) render(initial);
         refresh();
-        // Being on the about page implies Idle — assert it so F1 from a
-        // rotation URL pauses the scheduler too, not just navigates.
-        invoke("enter_idle").catch((e) => console.error(e));
+        // Only assert Idle when explicitly requested by the F1 escape path.
+        // Startup may render about briefly while scheduler/bootstrap spin up;
+        // that path should continue into Playing when config+logic exist.
+        if (window.location.hash === "#idle") {
+          invoke("enter_idle").catch((e) => console.error(e));
+          // Keep URL clean so refresh doesn't re-assert Idle indefinitely.
+          history.replaceState(null, "", window.location.pathname + window.location.search);
+        }
+
+        // Allow local operators to exit from the about page with Esc.
+        // We keep this page-local so Esc is not trapped on rotation URLs.
+        document.addEventListener("keydown", (ev) => {
+          if (ev.key !== "Escape") return;
+          ev.preventDefault();
+          const ok = window.confirm("Exit catstage now?");
+          if (!ok) return;
+          invoke("request_exit").catch((e) => console.error(e));
+        }, true);
       })();
     </script>
     <!--

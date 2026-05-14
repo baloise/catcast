@@ -75,7 +75,15 @@ fn build_escape_script(about_url: &str) -> String {
   document.addEventListener("keydown", (ev) => {{
     if (ev.key === "F1") {{
       ev.preventDefault();
-      window.location.href = ABOUT_URL;
+            // Mark this as an operator-initiated "go to about and pause" action.
+            // Startup may also render about briefly; that path must not force Idle.
+            try {{
+                const u = new URL(ABOUT_URL);
+                u.hash = "idle";
+                window.location.href = u.toString();
+            }} catch (_) {{
+                window.location.href = ABOUT_URL + "#idle";
+            }}
     }}
   }}, true);
 }})();
@@ -192,6 +200,7 @@ fn main() -> Result<()> {
             about::get_snapshot,
             about::cmd_log,
             about::enter_idle,
+            about::request_exit,
         ])
         .setup(move |app| {
             // Seed with a deterministic about URL so startup never records
