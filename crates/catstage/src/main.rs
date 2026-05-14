@@ -67,7 +67,7 @@ fn build_escape_script(about_url: &str) -> String {
     // the JS string. tauri::Url is well-formed but defence in depth.
     let about_url = about_url.replace('\\', "\\\\").replace('"', "\\\"");
     format!(
-        r#"
+        r##"
 (function () {{
   if (window.__catcastEscapeInstalled) return;
   window.__catcastEscapeInstalled = true;
@@ -87,7 +87,7 @@ fn build_escape_script(about_url: &str) -> String {
     }}
   }}, true);
 }})();
-"#
+"##
     )
 }
 
