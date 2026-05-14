@@ -95,8 +95,23 @@ fn build_escape_script(about_url: &str) -> String {
 #[command(name = "catstage", version, about = "CatCast fullscreen viewer")]
 struct Args {
     /// WebSocket URL of the CatSocks broker, e.g. wss://.../r/<room>.
-    #[arg(long)]
-    socks: String,
+    /// Required unless `--offline` or `--url` is given.
+    #[arg(
+        long,
+        required_unless_present_any = ["offline", "url"],
+        conflicts_with_all = ["offline", "url"],
+    )]
+    socks: Option<String>,
+
+    /// Run from on-disk config.yaml + logic.rhai without connecting to a
+    /// broker. Errors if neither file exists.
+    #[arg(long, conflicts_with = "url")]
+    offline: bool,
+
+    /// Display a single URL forever, with no broker and no config. Bypasses
+    /// rotation; the about page is reachable via F1 for diagnostics.
+    #[arg(long, value_name = "URL")]
+    url: Option<String>,
 
     /// Stage name. Defaults to the machine's hostname.
     #[arg(long)]
@@ -118,6 +133,31 @@ struct Args {
     /// can also be inspected when needed.
     #[arg(long)]
     devtools: bool,
+}
+
+/// Run-mode dispatch derived from `Args`. Online is the historical default;
+/// Offline and SingleUrl skip the broker entirely.
+#[derive(Debug, Clone)]
+enum RunMode {
+    Online { socks: String },
+    Offline,
+    SingleUrl { url: String },
+}
+
+impl RunMode {
+    fn is_offline(&self) -> bool {
+        !matches!(self, RunMode::Online { .. })
+    }
+
+    /// Human-readable broker_url for the about-page snapshot. Online stages
+    /// expose the real broker URL; offline modes show a sentinel so the page
+    /// makes clear there's no live connection.
+    fn broker_url_display(&self) -> String {
+        match self {
+            RunMode::Online { socks } => socks.clone(),
+            RunMode::Offline | RunMode::SingleUrl { .. } => "(offline)".into(),
+        }
+    }
 }
 
 /// Everything the dispatch path mutates. Held behind one mutex so the socks
@@ -155,8 +195,15 @@ fn main() -> Result<()> {
     let screen = args.screen;
 
     if args.install_autostart {
+        // Autostart shortcut bakes a `--socks` URL into the .lnk command line;
+        // it has no offline analogue today. Clap already requires `--socks`
+        // unless `--offline`/`--url` is set, so reject the unsupported combo
+        // here rather than producing a broken shortcut.
+        let socks = args.socks.clone().ok_or_else(|| {
+            anyhow::anyhow!("--install-autostart requires --socks (offline autostart not supported)")
+        })?;
         if let Some(path) = autostart::install(&autostart::AutostartArgs {
-            socks: args.socks.clone(),
+            socks,
             name: args.name.clone(),
             screen,
         })? {
@@ -165,14 +212,47 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    let run_mode = match (args.offline, args.url.clone(), args.socks.clone()) {
+        (true, _, _) => RunMode::Offline,
+        (false, Some(url), _) => RunMode::SingleUrl { url },
+        (false, None, Some(socks)) => RunMode::Online { socks },
+        // clap's `required_unless_present_any` guarantees we never reach this.
+        (false, None, None) => unreachable!("clap should have required --socks"),
+    };
+
+    // Pre-flight checks happen *before* `tauri::Builder` so a fatal config
+    // problem doesn't paint a window we're about to tear down.
+    match &run_mode {
+        RunMode::Offline => {
+            let cfg = persist::config_path()?;
+            let logic = persist::logic_path()?;
+            if !cfg.exists() && !logic.exists() {
+                eprintln!(
+                    "catstage: --offline requires on-disk config.yaml or logic.rhai (looked at {} and {}). \
+                     Push one with `catc config import` from an online stage, or run without --offline.",
+                    cfg.display(),
+                    logic.display(),
+                );
+                std::process::exit(1);
+            }
+        }
+        RunMode::SingleUrl { url } => {
+            if let Err(e) = tauri::Url::parse(url) {
+                eprintln!("catstage: --url value is not a valid URL: {e}");
+                std::process::exit(1);
+            }
+        }
+        RunMode::Online { .. } => {}
+    }
+
     eprintln!(
         "😼🎬 catstage v{} starting as {name}",
         env!("CARGO_PKG_VERSION"),
     );
 
-    let broker_url = args.socks.clone();
     let stage_name = name.clone();
     let open_devtools = args.devtools;
+    let setup_run_mode = run_mode.clone();
 
     tauri::Builder::default()
         // Install a tiny F1 → back-to-about handler on every page load.
@@ -254,7 +334,8 @@ fn main() -> Result<()> {
 
             app.manage(TauriCtx {
                 shared: std::sync::Arc::clone(&shared),
-                broker_url: broker_url.clone(),
+                broker_url: setup_run_mode.broker_url_display(),
+                offline: setup_run_mode.is_offline(),
                 sched_tx: sched_tx.clone(),
                 stage_name: stage_name.clone(),
                 screen,
@@ -262,12 +343,12 @@ fn main() -> Result<()> {
 
             let handle = app.handle().clone();
             let bootstrap_name = stage_name.clone();
-            let bootstrap_url = broker_url.clone();
+            let bootstrap_mode = setup_run_mode.clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = bootstrap(
                     handle,
                     bootstrap_name,
-                    bootstrap_url,
+                    bootstrap_mode,
                     shared,
                     logic_handle,
                     out_tx,
@@ -289,51 +370,77 @@ fn main() -> Result<()> {
 /// and the scheduler receiver are created synchronously in `setup()` and
 /// passed in, so `TauriCtx` is already managed and commands invoked from the
 /// about page's first paint succeed.
+///
+/// `mode` selects the startup path:
+/// - `Online`  — historical behavior (load disk, build plan, connect broker).
+/// - `Offline` — load disk + build plan as usual but skip the broker entirely.
+/// - `SingleUrl` — synthesize a one-entry plan, skip persistence + broker.
 #[allow(clippy::too_many_arguments)]
 async fn bootstrap(
     app: tauri::AppHandle,
     name: String,
-    _broker_url: String,
+    mode: RunMode,
     shared: Arc<Mutex<Shared>>,
     logic_handle: Arc<Mutex<Option<LogicHandle>>>,
     out_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<Message>>>>,
     socks_abort: Arc<tokio::sync::Notify>,
     sched_rx: tokio::sync::mpsc::Receiver<scheduler::Cmd>,
 ) -> Result<()> {
-    // Hydrate Shared from disk now that we're in an async context.
-    if let Some(s) = persist::load_state()? {
-        shared.lock().unwrap().state = s;
-    }
-    let config_yaml = persist::load_config_yaml()?;
-    let logic_rhai = persist::load_logic_rhai()?;
-    {
-        let mut sh = shared.lock().unwrap();
-        sh.config_yaml = config_yaml.clone();
-        sh.logic_rhai = logic_rhai.clone();
-    }
-
-    if config_yaml.is_none() && logic_rhai.is_none() {
-        eprintln!(
-            "catstage: no config/logic on disk — catcast://about splash with stage name '{name}'"
-        );
-    }
-
-    let key = Arc::new(Key::from_psk(&name).context("deriving AEAD key from stage name")?);
-
-    let initial_plan = match (&config_yaml, &logic_rhai) {
-        (Some(yaml), Some(rhai)) => match build_plan(yaml, rhai, &logic_handle) {
-            Ok(p) => {
+    let initial_plan = match &mode {
+        RunMode::Online { .. } | RunMode::Offline => {
+            // Hydrate Shared from disk. Online and Offline both consume the
+            // same persisted config.yaml / logic.rhai / state.json.
+            if let Some(s) = persist::load_state()? {
+                shared.lock().unwrap().state = s;
+            }
+            let config_yaml = persist::load_config_yaml()?;
+            let logic_rhai = persist::load_logic_rhai()?;
+            {
                 let mut sh = shared.lock().unwrap();
-                sh.state.has_config = true;
-                sh.state.has_logic = true;
-                p
+                sh.config_yaml = config_yaml.clone();
+                sh.logic_rhai = logic_rhai.clone();
             }
-            Err(e) => {
-                eprintln!("catstage: ignoring on-disk config/logic, eval failed: {e:#}");
-                Plan::default()
+
+            if config_yaml.is_none() && logic_rhai.is_none() {
+                eprintln!(
+                    "catstage: no config/logic on disk — catcast://about splash with stage name '{name}'"
+                );
             }
-        },
-        _ => Plan::default(),
+
+            match (&config_yaml, &logic_rhai) {
+                (Some(yaml), Some(rhai)) => match build_plan(yaml, rhai, &logic_handle) {
+                    Ok(p) => {
+                        let mut sh = shared.lock().unwrap();
+                        sh.state.has_config = true;
+                        sh.state.has_logic = true;
+                        p
+                    }
+                    Err(e) => {
+                        eprintln!("catstage: ignoring on-disk config/logic, eval failed: {e:#}");
+                        Plan::default()
+                    }
+                },
+                _ => Plan::default(),
+            }
+        }
+        RunMode::SingleUrl { url } => {
+            // Synthesize a one-entry rotation with effectively infinite slot
+            // duration so the scheduler never advances past the single URL.
+            // No persistence read/write — single-URL kiosks are ephemeral.
+            {
+                let mut sh = shared.lock().unwrap();
+                sh.state.current_url = Some(url.clone());
+            }
+            Plan {
+                default_secs: 1,
+                rotation: vec![crate::logic::RotationItem {
+                    url: url.clone(),
+                    secs: u64::MAX,
+                }],
+                cron: vec![],
+                one_shot: vec![],
+            }
+        }
     };
 
     let events = Arc::new(SchedEvents {
@@ -357,6 +464,19 @@ async fn bootstrap(
         Some(Arc::clone(&logic_handle)),
         events.clone(),
     );
+
+    let socks_url = match &mode {
+        RunMode::Online { socks } => socks.clone(),
+        // Offline and SingleUrl skip the broker entirely. Leaving `out_tx` as
+        // `None` makes `broadcast()` a no-op so dispatch-path State emits
+        // (none reach us since no inbound socks frames either) are dropped.
+        RunMode::Offline | RunMode::SingleUrl { .. } => {
+            let _ = socks_abort; // suppress unused-var warning in offline path
+            return Ok(());
+        }
+    };
+
+    let key = Arc::new(Key::from_psk(&name).context("deriving AEAD key from stage name")?);
 
     // sched_tx already lives in TauriCtx (managed synchronously in setup);
     // clone it for the socks inbound dispatch closure.
@@ -382,13 +502,8 @@ async fn bootstrap(
         });
     });
 
-    let broker_url = app
-        .state::<crate::about::TauriCtx>()
-        .inner()
-        .broker_url
-        .clone();
     let outbound = socks::spawn(
-        broker_url,
+        socks_url,
         name.clone(),
         Arc::clone(&key),
         handler,

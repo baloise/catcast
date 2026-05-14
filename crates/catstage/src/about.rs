@@ -49,7 +49,13 @@ impl AboutUrl {
 /// wire the socks inbound dispatch closure.
 pub struct TauriCtx {
     pub shared: Arc<Mutex<MainShared>>,
+    /// Human-readable broker location for the about-page snapshot. Online
+    /// stages expose the actual `wss://...` URL; offline modes carry the
+    /// sentinel `"(offline)"`.
     pub broker_url: String,
+    /// True when catstage was started with `--offline` or `--url` — no broker
+    /// task is spawned and the about page should make the operator aware.
+    pub offline: bool,
     pub sched_tx: mpsc::Sender<scheduler::Cmd>,
     pub stage_name: String,
     pub screen: Option<u32>,
@@ -66,6 +72,7 @@ pub struct FileEntry {
 pub struct Snapshot {
     pub state: State,
     pub broker_url: String,
+    pub offline: bool,
     pub stage_name: String,
     pub files: Vec<FileEntry>,
     pub autostart_path: Option<String>,
@@ -76,6 +83,7 @@ pub fn make_snapshot(ctx: &TauriCtx) -> Snapshot {
     Snapshot {
         state,
         broker_url: ctx.broker_url.clone(),
+        offline: ctx.offline,
         stage_name: ctx.stage_name.clone(),
         files: file_entries(),
         autostart_path: crate::autostart::is_installed().map(|p| p.display().to_string()),
