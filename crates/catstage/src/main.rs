@@ -423,6 +423,8 @@ async fn bootstrap(
             let logic_rhai = persist::load_logic_rhai()?;
             {
                 let mut sh = shared.lock().unwrap();
+                sh.state.name = name.clone();
+                sh.state.version = env!("CARGO_PKG_VERSION").to_string();
                 sh.config_yaml = config_yaml.clone();
                 sh.logic_rhai = logic_rhai.clone();
             }
