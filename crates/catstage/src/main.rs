@@ -30,6 +30,24 @@ use crate::logic::{LogicHandle, Plan};
 
 const WINDOW_LABEL: &str = "stage";
 
+#[cfg(target_os = "windows")]
+fn attach_parent_console_if_any() {
+    // Release builds use the Windows GUI subsystem, which starts detached
+    // from any console. Attach when launched from a terminal so clap help
+    // and argument errors remain visible to operators.
+    unsafe {
+        const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+        unsafe extern "system" {
+            fn AttachConsole(dwProcessId: u32) -> i32;
+        }
+
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn attach_parent_console_if_any() {}
+
 fn bundled_about_fallback() -> tauri::Url {
     #[cfg(target_os = "windows")]
     let raw = "http://tauri.localhost/";
@@ -170,6 +188,8 @@ pub(crate) struct Shared {
 }
 
 fn main() -> Result<()> {
+    attach_parent_console_if_any();
+
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("install rustls ring crypto provider");
