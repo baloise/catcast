@@ -4,23 +4,20 @@ pub const CURRENT_STATE_SCHEMA: u32 = 2;
 
 /// What the kiosk is currently doing.
 ///
-/// Three explicit modes replace the older `paused` + `manual` boolean pair:
-///
 /// - `Playing` — rotation runs, scheduler advances at slot boundaries.
-/// - `Paused` — frozen on the currently-shown rotation URL; advances
-///   suppressed until the operator hits `play` (or sends a Nav/back/forward).
-/// - `Idle` — kiosk parked on the bundled about page; "this screen is being
-///   attended to" signal. Set by `NavAbout`.
+/// - `Paused` — rotation frozen; advances suppressed until the operator
+///   hits `play` (or sends a Nav/back/forward). Used both when the operator
+///   freezes the current content URL and when the kiosk is on the about page
+///   (`catc about` / F1). `current_url` in `State` tells you which.
 ///
-/// Wire form is snake_case (`"playing"`, `"paused"`, `"idle"`) so a hand-
-/// edited `state.json` is greppable.
+/// Wire form is snake_case (`"playing"`, `"paused"`) so a hand-edited
+/// `state.json` is greppable.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
     #[default]
     Playing,
     Paused,
-    Idle,
 }
 
 /// Stage runtime state, persisted on disk and emitted to the CLI on `GetState`.

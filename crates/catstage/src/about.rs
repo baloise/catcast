@@ -9,7 +9,7 @@
 //! operator action is a `catc` command. The Tauri commands that survive
 //! on this surface are: `get_snapshot` (the page reads its own data),
 //! `cmd_log` (forwards JS console to stderr for diagnostics), and
-//! `enter_idle` (visiting the page asserts `Mode::Idle`, so F1 from a
+//! `enter_pause` (visiting the page asserts `Mode::Paused`, so F1 from a
 //! rotation URL is equivalent to `catc about`).
 
 use std::path::PathBuf;
@@ -26,7 +26,7 @@ use crate::Shared as MainShared;
 
 /// Canonical in-memory target for "go to about" actions. Updated by `main.rs`
 /// when it sees a finished load of the bundled about page, and used by both
-/// the injected F1 handler and Rust-side Idle transitions.
+/// the injected F1 handler and Rust-side Paused transitions.
 pub struct AboutUrl(pub Mutex<tauri::Url>);
 
 impl AboutUrl {
@@ -193,21 +193,21 @@ pub async fn cmd_log(level: String, msg: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Assert `Mode::Idle` while the about page is showing. Called by the page's
+/// Assert `Mode::Paused` while the about page is showing. Called by the page's
 /// first-paint JS so that arriving via F1 (which is a pure-JS
 /// `window.location.href` jump and can't speak the broker protocol) still
 /// pauses rotation — otherwise the scheduler would yank the operator back
-/// to a rotation URL at the next slot boundary. Idempotent when already Idle.
+/// to a rotation URL at the next slot boundary. Idempotent when already Paused.
 #[tauri::command]
-pub async fn enter_idle(ctx: tauri::State<'_, TauriCtx>) -> Result<(), String> {
+pub async fn enter_pause(ctx: tauri::State<'_, TauriCtx>) -> Result<(), String> {
     ctx.sched_tx
-        .send(scheduler::Cmd::Idle)
+        .send(scheduler::Cmd::Pause)
         .await
         .map_err(|e| e.to_string())
 }
 
 /// Resume scheduler playback from the about page. Bound to the page-local
-/// F2 shortcut so an operator can leave Idle without needing a separate CLI.
+/// F2 shortcut so an operator can resume without needing a separate CLI.
 #[tauri::command]
 pub async fn enter_play(ctx: tauri::State<'_, TauriCtx>) -> Result<(), String> {
     ctx.sched_tx

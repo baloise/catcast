@@ -37,10 +37,8 @@ pub enum Cmd {
     Pause,
     /// Resume rotation. Equivalent to `SetMode(Playing)`.
     Play,
-    /// Kiosk goes idle (about page). Suppresses rotation advances.
-    Idle,
     /// Step the rotation by `delta` (typically -1 / +1). Bypasses pause /
-    /// idle / one-shot. The oneshot reply carries the URL of the new slot,
+    /// one-shot. The oneshot reply carries the URL of the new slot,
     /// or `None` if the rotation is empty.
     Step {
         delta: i32,
@@ -90,7 +88,7 @@ pub fn spawn(
 ///
 /// The scheduler always boots in `Mode::Playing`; the operator's
 /// persisted mode is ignored at startup (a stage that was left in `Paused`
-/// or `Idle` recovers cleanly on next launch).
+/// recovers cleanly on next launch).
 pub fn spawn_with_rx(
     rx: mpsc::Receiver<Cmd>,
     plan: Plan,
@@ -193,12 +191,8 @@ async fn run(
                     Cmd::Play => {
                         set_mode(&mut rt, Mode::Playing, &events, &mut slot_started, &mut slot_duration);
                         // Re-announce the current rotation URL so the kiosk
-                        // moves off about (when leaving Idle) or off whatever
-                        // it was held on.
+                        // navigates away from whatever it was held on.
                         announce_current(&rt, &events);
-                    }
-                    Cmd::Idle => {
-                        set_mode(&mut rt, Mode::Idle, &events, &mut slot_started, &mut slot_duration);
                     }
                     Cmd::Step { delta, reply } => {
                         let new_url = if rt.plan.rotation.is_empty() {
@@ -210,11 +204,6 @@ async fn run(
                             let n = rt.plan.rotation.len() as i32;
                             rt.idx = (rt.idx as i32 + delta).rem_euclid(n) as usize;
                             rt.one_shot_until = None;
-                            // Stepping from Idle implicitly resumes playing —
-                            // operator wants to see the slot, not stay on about.
-                            if rt.mode == Mode::Idle {
-                                set_mode(&mut rt, Mode::Playing, &events, &mut slot_started, &mut slot_duration);
-                            }
                             slot_started = Instant::now();
                             slot_duration = current_slot_duration(&rt);
                             let u = rt.plan.rotation[rt.idx].url.clone();
@@ -506,19 +495,19 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn idle_then_play_re_announces_url() {
+    async fn paused_then_play_re_announces_url() {
         let coll = Arc::new(Collector::default());
         let tx = spawn(plan_two_urls(), None, coll.clone());
         tokio::time::advance(Duration::from_millis(50)).await;
-        tx.send(Cmd::Idle).await.unwrap();
+        tx.send(Cmd::Pause).await.unwrap();
         tokio::time::advance(Duration::from_millis(50)).await;
         tx.send(Cmd::Play).await.unwrap();
         tokio::time::advance(Duration::from_millis(50)).await;
         tokio::task::yield_now().await;
         let modes = coll.modes.lock().unwrap().clone();
-        assert_eq!(modes, vec![Mode::Idle, Mode::Playing]);
-        // Play after Idle should re-emit the current rotation URL so the
-        // kiosk moves off about.
+        assert_eq!(modes, vec![Mode::Paused, Mode::Playing]);
+        // Play after Paused should re-emit the current rotation URL so the
+        // kiosk navigates back from wherever it was held.
         let urls = coll.urls.lock().unwrap().clone();
         let after_play_count = urls.iter().filter(|u| u.as_str() == "https://a/").count();
         assert!(

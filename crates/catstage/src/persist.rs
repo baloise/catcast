@@ -86,9 +86,7 @@ fn migrate_state_v1_to_v2(mut v: serde_json::Value) -> serde_json::Value {
         .remove("paused")
         .and_then(|x| x.as_bool())
         .unwrap_or(false);
-    let mode = if manual {
-        Mode::Idle
-    } else if paused {
+    let mode = if manual || paused {
         Mode::Paused
     } else {
         Mode::Playing
@@ -162,7 +160,7 @@ mod tests {
     }
 
     #[test]
-    fn migrates_v1_manual_to_mode_idle() {
+    fn migrates_v1_manual_to_mode_paused() {
         let v1 = serde_json::json!({
             "schema": 1,
             "name": "kitchen",
@@ -176,7 +174,7 @@ mod tests {
         });
         let migrated = migrate_state_v1_to_v2(v1);
         let s: State = serde_json::from_value(migrated).unwrap();
-        assert_eq!(s.mode, Mode::Idle);
+        assert_eq!(s.mode, Mode::Paused);
     }
 
     #[test]

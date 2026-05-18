@@ -302,7 +302,7 @@ fn main() -> Result<()> {
         .invoke_handler(tauri::generate_handler![
             about::get_snapshot,
             about::cmd_log,
-            about::enter_idle,
+            about::enter_pause,
             about::enter_play,
             about::request_exit,
         ])
@@ -482,10 +482,7 @@ async fn bootstrap(
     });
 
     // Scheduler always boots in Playing; persisted mode is intentionally
-    // ignored. A stage left in Paused or Idle when it last exited recovers
-    // cleanly. The persisted mode in state.json mostly reflects the most-
-    // recent operator action — useful for the about page on next launch but
-    // not as a runtime resume target.
+    // ignored. A stage left in Paused when it last exited recovers cleanly.
     {
         let mut sh = shared.lock().unwrap();
         sh.state.mode = catcast_core::Mode::Playing;
@@ -650,21 +647,12 @@ impl scheduler::Events for SchedEvents {
         if let Err(e) = persist::save_state(&snap) {
             eprintln!("catstage: state save failed: {e:#}");
         }
-        // Idle transitions need the kiosk on the about page; transitions
-        // *off* idle re-announce the rotation URL via the scheduler's
-        // Cmd::Play handler. We only have to handle the Idle direction
-        // here because non-idle modes don't dictate a particular URL.
-        if mode == catcast_core::Mode::Idle {
-            navigate_to_about(&self.app);
-        }
         about::emit_state(&self.app, WINDOW_LABEL);
     }
 }
 
-/// Send the kiosk window back to the bundled about page. Used by mode
-/// transitions into `Idle`, and by the `NavAbout` dispatch arm (which also
-/// emits a Reply). Bypasses `steer_webview`'s gating — Idle *is* the gate
-/// now.
+/// Send the kiosk window back to the bundled about page. Called directly
+/// from the `NavAbout` dispatch arm.
 fn navigate_to_about(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
         return;
@@ -684,19 +672,11 @@ fn navigate_to_about(app: &tauri::AppHandle) {
     }
 }
 
-/// Drive the kiosk webview to `url`. Skipped when the stage is `Idle`
-/// (kiosk should stay on about) so rotation index advances under the hood
-/// don't yank the operator off the admin page.
+/// Drive the kiosk webview to `url`.
 fn steer_webview(app: &tauri::AppHandle, url: &str) {
     let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
         return;
     };
-    let Some(ctx) = app.try_state::<TauriCtx>() else {
-        return;
-    };
-    if ctx.shared.lock().unwrap().state.mode == catcast_core::Mode::Idle {
-        return;
-    }
     if let Ok(parsed) = tauri::Url::parse(url) {
         if let Err(e) = window.navigate(parsed) {
             eprintln!("catstage: navigate({url}) failed: {e}");
@@ -727,17 +707,8 @@ async fn dispatch(
     // broadcast (GetState) return None.
     let outcome: Option<Result<String, String>> = match msg {
         Message::Pause => {
-            // Pausing from Idle is a no-op trap — there's no current URL to
-            // freeze on. Surface the real reason rather than silently
-            // accepting and looking stuck.
-            if shared.lock().unwrap().state.mode == catcast_core::Mode::Idle {
-                Some(Err(
-                    "nothing to pause — stage is on the about page (run `catc play`)".into(),
-                ))
-            } else {
-                let _ = sched.send(Cmd::Pause).await;
-                Some(Ok(decorate("paused", &shared)))
-            }
+            let _ = sched.send(Cmd::Pause).await;
+            Some(Ok(decorate("paused", &shared)))
         }
         Message::Play => {
             let _ = sched.send(Cmd::Play).await;
@@ -782,10 +753,8 @@ async fn dispatch(
             None
         }
         Message::NavAbout => {
-            // The scheduler flips mode → Idle and the on_mode_change handler
-            // does the actual `window.navigate(about_url)`. Dispatch just
-            // needs to send the command and craft the reply.
-            let _ = sched.send(Cmd::Idle).await;
+            let _ = sched.send(Cmd::Pause).await;
+            navigate_to_about(&app);
             Some(Ok("on about".into()))
         }
         Message::AutostartInstall => Some(match app.try_state::<crate::about::TauriCtx>() {
