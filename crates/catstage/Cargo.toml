@@ -15,6 +15,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 catcast-core = { workspace = true }
+catcast-net = { workspace = true }
 catcast-proto = { workspace = true }
 
 clap = { workspace = true }

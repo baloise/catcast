@@ -10,7 +10,7 @@ use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::time::timeout;
-use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
+use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 pub struct Broker {
     ws: tokio_tungstenite::WebSocketStream<
@@ -20,7 +20,7 @@ pub struct Broker {
 
 impl Broker {
     pub async fn connect(url: &str) -> Result<Self> {
-        let (ws, _resp) = connect_async(url)
+        let (ws, _resp) = connect_ws(url)
             .await
             .with_context(|| format!("connect to broker {url}"))?;
         Ok(Self { ws })
@@ -69,6 +69,15 @@ impl Broker {
     pub async fn close(mut self) {
         let _ = self.ws.close(None).await;
     }
+}
+
+async fn connect_ws(
+    url: &str,
+) -> Result<(
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    tokio_tungstenite::tungstenite::handshake::client::Response,
+)> {
+    catcast_net::connect(url).await
 }
 
 pub fn keys_for(names: &[String]) -> Result<HashMap<String, Key>> {

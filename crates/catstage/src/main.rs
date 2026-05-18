@@ -10,6 +10,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -361,6 +362,9 @@ fn main() -> Result<()> {
                 sched_tx: sched_tx.clone(),
                 stage_name: stage_name.clone(),
                 screen,
+                connection: std::sync::Arc::new(AtomicU8::new(
+                    crate::about::Connection::Unknown as u8,
+                )),
             });
 
             let handle = app.handle().clone();
@@ -536,6 +540,20 @@ async fn bootstrap(
         Arc::clone(&key),
         handler,
         Arc::clone(&socks_abort),
+        {
+            let app = app.clone();
+            Arc::new(move |up| {
+                crate::about::set_connection(
+                    &app,
+                    if up {
+                        crate::about::Connection::Up
+                    } else {
+                        crate::about::Connection::Down
+                    },
+                    WINDOW_LABEL,
+                );
+            })
+        },
     );
     *out_tx.lock().unwrap() = Some(outbound.clone());
 

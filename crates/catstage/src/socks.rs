@@ -19,6 +19,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 /// Inbound, post-decrypt message addressed to this stage.
 pub type InboundHandler = Arc<dyn Fn(Plaintext) + Send + Sync>;
+pub type ConnectionHandler = Arc<dyn Fn(bool) + Send + Sync>;
 
 /// Reason the inner `connect_and_pump` loop exited. Used by `run` to decide
 /// whether to honour the backoff timer or reconnect immediately.
@@ -51,9 +52,10 @@ pub fn spawn(
     key: Arc<Key>,
     handler: InboundHandler,
     abort: Arc<Notify>,
+    on_connection: ConnectionHandler,
 ) -> mpsc::Sender<Message> {
     let (tx, rx) = mpsc::channel::<Message>(64);
-    tokio::spawn(run(url, name, key, handler, rx, abort));
+    tokio::spawn(run(url, name, key, handler, rx, abort, on_connection));
     tx
 }
 
@@ -64,19 +66,24 @@ async fn run(
     handler: InboundHandler,
     mut rx: mpsc::Receiver<Message>,
     abort: Arc<Notify>,
+    on_connection: ConnectionHandler,
 ) {
     let mut backoff = Duration::from_millis(500);
+    on_connection(false);
     loop {
-        match connect_and_pump(&url, &name, &key, &handler, &mut rx, &abort).await {
+        match connect_and_pump(&url, &name, &key, &handler, &mut rx, &abort, &on_connection).await {
             Disconnect::Shutdown => {
+                on_connection(false);
                 tracing::info!("socks: channel closed, exiting");
                 return;
             }
             Disconnect::Forced => {
+                on_connection(false);
                 eprintln!("socks: force-reconnect requested; reconnecting now");
                 backoff = Duration::from_millis(500);
             }
             Disconnect::Error(e) => {
+                on_connection(false);
                 tracing::warn!("socks: connection error: {e:#}; reconnecting in {backoff:?}");
                 eprintln!("socks: {e:#}; reconnecting in {backoff:?}");
                 // Sleep with backoff, but cut short if a force-reconnect is
@@ -102,8 +109,9 @@ async fn connect_and_pump(
     handler: &InboundHandler,
     rx: &mut mpsc::Receiver<Message>,
     abort: &Notify,
+    on_connection: &ConnectionHandler,
 ) -> Disconnect {
-    let (ws, _resp) = match tokio_tungstenite::connect_async(url)
+    let (ws, _resp) = match connect_ws(url)
         .await
         .with_context(|| format!("connecting to {url}"))
     {
@@ -112,6 +120,8 @@ async fn connect_and_pump(
     };
     tracing::info!("socks: connected to {url}");
     eprintln!("socks: connected to {url}");
+    on_connection(true);
+    // `run` updates the UI status; this function only owns the socket pump.
     let (mut sink, mut stream) = ws.split();
 
     loop {
@@ -165,4 +175,13 @@ async fn connect_and_pump(
             }
         }
     }
+}
+
+async fn connect_ws(
+    url: &str,
+) -> anyhow::Result<(
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    tokio_tungstenite::tungstenite::handshake::client::Response,
+)> {
+    catcast_net::connect(url).await
 }

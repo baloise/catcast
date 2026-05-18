@@ -13,6 +13,7 @@
 //! rotation URL is equivalent to `catc about`).
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use catcast_core::State;
@@ -59,6 +60,37 @@ pub struct TauriCtx {
     pub sched_tx: mpsc::Sender<scheduler::Cmd>,
     pub stage_name: String,
     pub screen: Option<u32>,
+    /// Socks link status for the about-page broker indicator.
+    pub connection: Arc<AtomicU8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Connection {
+    Unknown = 0,
+    Up = 1,
+    Down = 2,
+    Offline = 3,
+}
+
+impl Connection {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Up => "up",
+            Self::Down => "down",
+            Self::Offline => "offline",
+        }
+    }
+
+    fn from_u8(raw: u8) -> Self {
+        match raw {
+            1 => Self::Up,
+            2 => Self::Down,
+            3 => Self::Offline,
+            _ => Self::Unknown,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -72,6 +104,7 @@ pub struct FileEntry {
 pub struct Snapshot {
     pub state: State,
     pub broker_url: String,
+    pub connection: String,
     pub offline: bool,
     pub stage_name: String,
     pub files: Vec<FileEntry>,
@@ -80,13 +113,29 @@ pub struct Snapshot {
 
 pub fn make_snapshot(ctx: &TauriCtx) -> Snapshot {
     let state = ctx.shared.lock().expect("Shared poisoned").state.clone();
+    let connection = if ctx.offline {
+        Connection::Offline
+    } else {
+        Connection::from_u8(ctx.connection.load(Ordering::Relaxed))
+    };
     Snapshot {
         state,
         broker_url: ctx.broker_url.clone(),
+        connection: connection.as_str().to_string(),
         offline: ctx.offline,
         stage_name: ctx.stage_name.clone(),
         files: file_entries(),
         autostart_path: crate::autostart::is_installed().map(|p| p.display().to_string()),
+    }
+}
+
+pub fn set_connection(app: &tauri::AppHandle, status: Connection, label: &str) {
+    let Some(ctx) = app.try_state::<TauriCtx>() else {
+        return;
+    };
+    let old = ctx.connection.swap(status as u8, Ordering::Relaxed);
+    if old != status as u8 {
+        emit_state(app, label);
     }
 }
 
