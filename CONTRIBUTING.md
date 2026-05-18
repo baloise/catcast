@@ -90,8 +90,12 @@ cargo run -p catsocks
 **Terminal 2 — a stage:**
 
 ```bash
-cargo run -p catstage -- --socks ws://127.0.0.1:8787/r/dev --name kitchen
+cargo run -p catstage -- --socks ws://127.0.0.1:8787/r/dev --name kitchen --screen 2
 ```
+
+`--screen` is optional and 1-based (`--screen 2` means second monitor).
+If the selected monitor is unavailable, catstage falls back to the primary
+monitor.
 
 Tauri opens a fullscreen window pointed at `catcast://about` — a
 **read-only** info page showing the stage's name, version, connection

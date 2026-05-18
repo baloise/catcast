@@ -30,6 +30,33 @@ use crate::logic::{LogicHandle, Plan};
 
 const WINDOW_LABEL: &str = "stage";
 
+fn bundled_about_fallback() -> tauri::Url {
+    #[cfg(target_os = "windows")]
+    let raw = "http://tauri.localhost/";
+    #[cfg(not(target_os = "windows"))]
+    let raw = "tauri://localhost/";
+
+    tauri::Url::parse(raw).expect("valid bundled about fallback URL")
+}
+
+fn is_blank_url(url: &tauri::Url) -> bool {
+    url.as_str().eq_ignore_ascii_case("about:blank")
+}
+
+fn is_bundled_about_url(url: &tauri::Url) -> bool {
+    if is_blank_url(url) {
+        return false;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return url.scheme() == "http" && url.domain() == Some("tauri.localhost");
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        return url.scheme() == "tauri";
+    }
+}
+
 /// Build the F1-only escape script for `WebviewWindow::on_page_load`.
 /// Pure JS, no IPC dependency — works on any page including external
 /// rotation URLs where Tauri doesn't inject `window.__TAURI__`. Operators
@@ -40,7 +67,7 @@ fn build_escape_script(about_url: &str) -> String {
     // the JS string. tauri::Url is well-formed but defence in depth.
     let about_url = about_url.replace('\\', "\\\\").replace('"', "\\\"");
     format!(
-        r#"
+        r##"
 (function () {{
   if (window.__catcastEscapeInstalled) return;
   window.__catcastEscapeInstalled = true;
@@ -48,11 +75,19 @@ fn build_escape_script(about_url: &str) -> String {
   document.addEventListener("keydown", (ev) => {{
     if (ev.key === "F1") {{
       ev.preventDefault();
-      window.location.href = ABOUT_URL;
+            // Mark this as an operator-initiated "go to about and pause" action.
+            // Startup may also render about briefly; that path must not force Idle.
+            try {{
+                const u = new URL(ABOUT_URL);
+                u.hash = "idle";
+                window.location.href = u.toString();
+            }} catch (_) {{
+                window.location.href = ABOUT_URL + "#idle";
+            }}
     }}
   }}, true);
 }})();
-"#
+"##
     )
 }
 
@@ -60,12 +95,32 @@ fn build_escape_script(about_url: &str) -> String {
 #[command(name = "catstage", version, about = "CatCast fullscreen viewer")]
 struct Args {
     /// WebSocket URL of the CatSocks broker, e.g. wss://.../r/<room>.
-    #[arg(long)]
-    socks: String,
+    /// Required unless `--offline` or `--url` is given.
+    #[arg(
+        long,
+        required_unless_present_any = ["offline", "url"],
+        conflicts_with_all = ["offline", "url"],
+    )]
+    socks: Option<String>,
+
+    /// Run from on-disk config.yaml + logic.rhai without connecting to a
+    /// broker. Errors if neither file exists.
+    #[arg(long, conflicts_with = "url")]
+    offline: bool,
+
+    /// Display a single URL forever, with no broker and no config. Bypasses
+    /// rotation; the about page is reachable via F1 for diagnostics.
+    #[arg(long, value_name = "URL")]
+    url: Option<String>,
 
     /// Stage name. Defaults to the machine's hostname.
     #[arg(long)]
     name: Option<String>,
+
+    /// Monitor index to use on startup (1-based: 1 = first monitor).
+    /// Invalid values fall back to the primary monitor.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    screen: Option<u32>,
 
     /// Drop a Startup-folder shortcut so this stage launches at login,
     /// then exit. (The catcast://about wizard does the same thing
@@ -78,6 +133,31 @@ struct Args {
     /// can also be inspected when needed.
     #[arg(long)]
     devtools: bool,
+}
+
+/// Run-mode dispatch derived from `Args`. Online is the historical default;
+/// Offline and SingleUrl skip the broker entirely.
+#[derive(Debug, Clone)]
+enum RunMode {
+    Online { socks: String },
+    Offline,
+    SingleUrl { url: String },
+}
+
+impl RunMode {
+    fn is_offline(&self) -> bool {
+        !matches!(self, RunMode::Online { .. })
+    }
+
+    /// Human-readable broker_url for the about-page snapshot. Online stages
+    /// expose the real broker URL; offline modes show a sentinel so the page
+    /// makes clear there's no live connection.
+    fn broker_url_display(&self) -> String {
+        match self {
+            RunMode::Online { socks } => socks.clone(),
+            RunMode::Offline | RunMode::SingleUrl { .. } => "(offline)".into(),
+        }
+    }
 }
 
 /// Everything the dispatch path mutates. Held behind one mutex so the socks
@@ -112,15 +192,59 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
     let name = args.name.clone().unwrap_or_else(default_name);
+    let screen = args.screen;
 
     if args.install_autostart {
+        // Autostart shortcut bakes a `--socks` URL into the .lnk command line;
+        // it has no offline analogue today. Clap already requires `--socks`
+        // unless `--offline`/`--url` is set, so reject the unsupported combo
+        // here rather than producing a broken shortcut.
+        let socks = args.socks.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "--install-autostart requires --socks (offline autostart not supported)"
+            )
+        })?;
         if let Some(path) = autostart::install(&autostart::AutostartArgs {
-            socks: args.socks.clone(),
+            socks,
             name: args.name.clone(),
+            screen,
         })? {
             eprintln!("catstage: autostart installed at {}", path.display());
         }
         return Ok(());
+    }
+
+    let run_mode = match (args.offline, args.url.clone(), args.socks.clone()) {
+        (true, _, _) => RunMode::Offline,
+        (false, Some(url), _) => RunMode::SingleUrl { url },
+        (false, None, Some(socks)) => RunMode::Online { socks },
+        // clap's `required_unless_present_any` guarantees we never reach this.
+        (false, None, None) => unreachable!("clap should have required --socks"),
+    };
+
+    // Pre-flight checks happen *before* `tauri::Builder` so a fatal config
+    // problem doesn't paint a window we're about to tear down.
+    match &run_mode {
+        RunMode::Offline => {
+            let cfg = persist::config_path()?;
+            let logic = persist::logic_path()?;
+            if !cfg.exists() && !logic.exists() {
+                eprintln!(
+                    "catstage: --offline requires on-disk config.yaml or logic.rhai (looked at {} and {}). \
+                     Push one with `catc config import` from an online stage, or run without --offline.",
+                    cfg.display(),
+                    logic.display(),
+                );
+                std::process::exit(1);
+            }
+        }
+        RunMode::SingleUrl { url } => {
+            if let Err(e) = tauri::Url::parse(url) {
+                eprintln!("catstage: --url value is not a valid URL: {e}");
+                std::process::exit(1);
+            }
+        }
+        RunMode::Online { .. } => {}
     }
 
     eprintln!(
@@ -128,9 +252,9 @@ fn main() -> Result<()> {
         env!("CARGO_PKG_VERSION"),
     );
 
-    let broker_url = args.socks.clone();
     let stage_name = name.clone();
     let open_devtools = args.devtools;
+    let setup_run_mode = run_mode.clone();
 
     tauri::Builder::default()
         // Install a tiny F1 → back-to-about handler on every page load.
@@ -139,11 +263,18 @@ fn main() -> Result<()> {
         // (intentionally minimal) JS body.
         .on_page_load(|webview, payload| {
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
-                let about_url = webview
-                    .app_handle()
+                let app = webview.app_handle();
+                if let Some(state) = app.try_state::<about::AboutUrl>() {
+                    if let Ok(url) = webview.url() {
+                        if is_bundled_about_url(&url) {
+                            state.set(url);
+                        }
+                    }
+                }
+                let about_url = app
                     .try_state::<about::AboutUrl>()
-                    .map(|s| s.0.to_string())
-                    .unwrap_or_else(|| "tauri://localhost/".into());
+                    .map(|s| s.get().to_string())
+                    .unwrap_or_else(|| bundled_about_fallback().to_string());
                 let _ = webview.eval(build_escape_script(&about_url));
             }
         })
@@ -151,21 +282,32 @@ fn main() -> Result<()> {
             about::get_snapshot,
             about::cmd_log,
             about::enter_idle,
+            about::enter_play,
+            about::request_exit,
         ])
         .setup(move |app| {
+            // Seed with a deterministic about URL so startup never records
+            // `about:blank` as the canonical return target.
+            app.manage(about::AboutUrl::new(bundled_about_fallback()));
+
             // Force fullscreen at runtime in addition to the config-time
             // request. WSLg / Wayland in particular tend to ignore the
             // config-time `fullscreen: true` because the compositor isn't
             // ready when the window is created.
             //
-            // Also capture the initial URL (the bundled index.html, served by
-            // Tauri at `tauri://localhost/` on Linux or `http://tauri.localhost/`
-            // on Windows) so hotkey commands can navigate back to it later
-            // without hard-coding a platform-specific URL.
+            // If setup-time URL probing already sees the bundled about page,
+            // store it. Ignore `about:blank` and non-bundled URLs.
             if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
+                if let Some(screen_num) = screen {
+                    position_window_on_screen(&window, screen_num);
+                }
                 let _ = window.set_fullscreen(true);
                 if let Ok(url) = window.url() {
-                    app.manage(about::AboutUrl(url));
+                    if is_bundled_about_url(&url) {
+                        if let Some(state) = app.try_state::<about::AboutUrl>() {
+                            state.set(url);
+                        }
+                    }
                 }
                 // Opt-in: only open DevTools when --devtools was passed.
                 // Auto-opening on every run was intrusive for normal use.
@@ -194,19 +336,21 @@ fn main() -> Result<()> {
 
             app.manage(TauriCtx {
                 shared: std::sync::Arc::clone(&shared),
-                broker_url: broker_url.clone(),
+                broker_url: setup_run_mode.broker_url_display(),
+                offline: setup_run_mode.is_offline(),
                 sched_tx: sched_tx.clone(),
                 stage_name: stage_name.clone(),
+                screen,
             });
 
             let handle = app.handle().clone();
             let bootstrap_name = stage_name.clone();
-            let bootstrap_url = broker_url.clone();
+            let bootstrap_mode = setup_run_mode.clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = bootstrap(
                     handle,
                     bootstrap_name,
-                    bootstrap_url,
+                    bootstrap_mode,
                     shared,
                     logic_handle,
                     out_tx,
@@ -228,51 +372,83 @@ fn main() -> Result<()> {
 /// and the scheduler receiver are created synchronously in `setup()` and
 /// passed in, so `TauriCtx` is already managed and commands invoked from the
 /// about page's first paint succeed.
+///
+/// `mode` selects the startup path:
+/// - `Online`  — historical behavior (load disk, build plan, connect broker).
+/// - `Offline` — load disk + build plan as usual but skip the broker entirely.
+/// - `SingleUrl` — synthesize a one-entry plan, skip persistence + broker.
 #[allow(clippy::too_many_arguments)]
 async fn bootstrap(
     app: tauri::AppHandle,
     name: String,
-    _broker_url: String,
+    mode: RunMode,
     shared: Arc<Mutex<Shared>>,
     logic_handle: Arc<Mutex<Option<LogicHandle>>>,
     out_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<Message>>>>,
     socks_abort: Arc<tokio::sync::Notify>,
     sched_rx: tokio::sync::mpsc::Receiver<scheduler::Cmd>,
 ) -> Result<()> {
-    // Hydrate Shared from disk now that we're in an async context.
-    if let Some(s) = persist::load_state()? {
-        shared.lock().unwrap().state = s;
-    }
-    let config_yaml = persist::load_config_yaml()?;
-    let logic_rhai = persist::load_logic_rhai()?;
-    {
-        let mut sh = shared.lock().unwrap();
-        sh.config_yaml = config_yaml.clone();
-        sh.logic_rhai = logic_rhai.clone();
-    }
-
-    if config_yaml.is_none() && logic_rhai.is_none() {
-        eprintln!(
-            "catstage: no config/logic on disk — catcast://about splash with stage name '{name}'"
-        );
-    }
-
-    let key = Arc::new(Key::from_psk(&name).context("deriving AEAD key from stage name")?);
-
-    let initial_plan = match (&config_yaml, &logic_rhai) {
-        (Some(yaml), Some(rhai)) => match build_plan(yaml, rhai, &logic_handle) {
-            Ok(p) => {
+    let initial_plan = match &mode {
+        RunMode::Online { .. } | RunMode::Offline => {
+            // Hydrate Shared from disk. Online and Offline both consume the
+            // same persisted config.yaml / logic.rhai / state.json.
+            if let Some(s) = persist::load_state()? {
+                shared.lock().unwrap().state = s;
+            }
+            let config_yaml = persist::load_config_yaml()?;
+            let logic_rhai = persist::load_logic_rhai()?;
+            {
                 let mut sh = shared.lock().unwrap();
-                sh.state.has_config = true;
-                sh.state.has_logic = true;
-                p
+                sh.config_yaml = config_yaml.clone();
+                sh.logic_rhai = logic_rhai.clone();
             }
-            Err(e) => {
-                eprintln!("catstage: ignoring on-disk config/logic, eval failed: {e:#}");
-                Plan::default()
+
+            if config_yaml.is_none() && logic_rhai.is_none() {
+                eprintln!(
+                    "catstage: no config/logic on disk — catcast://about splash with stage name '{name}'"
+                );
             }
-        },
-        _ => Plan::default(),
+
+            match (&config_yaml, &logic_rhai) {
+                (Some(yaml), Some(rhai)) => match build_plan(yaml, rhai, &logic_handle) {
+                    Ok(p) => {
+                        let mut sh = shared.lock().unwrap();
+                        sh.state.has_config = true;
+                        sh.state.has_logic = true;
+                        p
+                    }
+                    Err(e) => {
+                        eprintln!("catstage: ignoring on-disk config/logic, eval failed: {e:#}");
+                        Plan::default()
+                    }
+                },
+                _ => Plan::default(),
+            }
+        }
+        RunMode::SingleUrl { url } => {
+            // Synthesize a one-entry rotation with effectively infinite slot
+            // duration so the scheduler never advances past the single URL.
+            // No persistence read/write — single-URL kiosks are ephemeral.
+            // Picked 100 years (not u64::MAX) because `Instant + Duration`
+            // overflows on absurd values and the scheduler would panic on
+            // its first `sleep_until` call. Rotation has length 1, so even
+            // if the slot ever did expire `(idx + 1) % 1 == 0` keeps us on
+            // the same URL.
+            const HUNDRED_YEARS_SECS: u64 = 60 * 60 * 24 * 365 * 100;
+            {
+                let mut sh = shared.lock().unwrap();
+                sh.state.current_url = Some(url.clone());
+            }
+            Plan {
+                default_secs: 1,
+                rotation: vec![crate::logic::RotationItem {
+                    url: url.clone(),
+                    secs: HUNDRED_YEARS_SECS,
+                }],
+                cron: vec![],
+                one_shot: vec![],
+            }
+        }
     };
 
     let events = Arc::new(SchedEvents {
@@ -296,6 +472,19 @@ async fn bootstrap(
         Some(Arc::clone(&logic_handle)),
         events.clone(),
     );
+
+    let socks_url = match &mode {
+        RunMode::Online { socks } => socks.clone(),
+        // Offline and SingleUrl skip the broker entirely. Leaving `out_tx` as
+        // `None` makes `broadcast()` a no-op so dispatch-path State emits
+        // (none reach us since no inbound socks frames either) are dropped.
+        RunMode::Offline | RunMode::SingleUrl { .. } => {
+            let _ = socks_abort; // suppress unused-var warning in offline path
+            return Ok(());
+        }
+    };
+
+    let key = Arc::new(Key::from_psk(&name).context("deriving AEAD key from stage name")?);
 
     // sched_tx already lives in TauriCtx (managed synchronously in setup);
     // clone it for the socks inbound dispatch closure.
@@ -321,13 +510,8 @@ async fn bootstrap(
         });
     });
 
-    let broker_url = app
-        .state::<crate::about::TauriCtx>()
-        .inner()
-        .broker_url
-        .clone();
     let outbound = socks::spawn(
-        broker_url,
+        socks_url,
         name.clone(),
         Arc::clone(&key),
         handler,
@@ -344,6 +528,48 @@ async fn bootstrap(
 fn default_name() -> String {
     let raw = gethostname::gethostname();
     raw.to_string_lossy().to_string()
+}
+
+fn position_window_on_screen(window: &tauri::WebviewWindow, screen_num: u32) {
+    let requested_idx = screen_num.saturating_sub(1) as usize;
+
+    let target = match window.available_monitors() {
+        Ok(monitors) => {
+            if let Some(monitor) = monitors.get(requested_idx) {
+                Some(monitor.clone())
+            } else {
+                eprintln!(
+                    "catstage: --screen {} unavailable ({} monitor(s)); falling back to primary",
+                    screen_num,
+                    monitors.len()
+                );
+                match window.primary_monitor() {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!("catstage: primary_monitor() failed: {e}");
+                        None
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("catstage: available_monitors() failed: {e}");
+            match window.primary_monitor() {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("catstage: primary_monitor() failed: {e}");
+                    None
+                }
+            }
+        }
+    };
+
+    if let Some(monitor) = target {
+        let _ = window.set_fullscreen(false);
+        if let Err(e) = window.set_position(monitor.position().to_owned()) {
+            eprintln!("catstage: set_position() failed: {e}");
+        }
+    }
 }
 
 struct SchedEvents {
@@ -405,10 +631,17 @@ fn navigate_to_about(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
         return;
     };
-    let Some(about_url) = app.try_state::<about::AboutUrl>() else {
-        return;
-    };
-    if let Err(e) = window.navigate(about_url.0.clone()) {
+    let mut target = app
+        .try_state::<about::AboutUrl>()
+        .map(|s| s.get())
+        .unwrap_or_else(bundled_about_fallback);
+    if !is_bundled_about_url(&target) {
+        target = bundled_about_fallback();
+        if let Some(state) = app.try_state::<about::AboutUrl>() {
+            state.set(target.clone());
+        }
+    }
+    if let Err(e) = window.navigate(target) {
         eprintln!("catstage: navigate(about) failed: {e}");
     }
 }
@@ -521,7 +754,12 @@ async fn dispatch(
             Some(ctx) => {
                 let socks = ctx.inner().broker_url.clone();
                 let name = Some(ctx.inner().stage_name.clone());
-                let res = match autostart::install(&autostart::AutostartArgs { socks, name }) {
+                let screen = ctx.inner().screen;
+                let res = match autostart::install(&autostart::AutostartArgs {
+                    socks,
+                    name,
+                    screen,
+                }) {
                     Ok(Some(p)) => Ok(format!("installed at {}", p.display())),
                     Ok(None) => Ok("no-op on this OS".into()),
                     Err(e) => Err(format!("install failed: {e:#}")),

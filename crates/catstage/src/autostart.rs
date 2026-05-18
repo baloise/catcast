@@ -31,6 +31,8 @@ pub struct AutostartArgs {
     pub socks: String,
     /// Optional `--name <stage-name>` override.
     pub name: Option<String>,
+    /// Optional `--screen <N>` monitor selection (1-based).
+    pub screen: Option<u32>,
 }
 
 /// Install (or replace) the Startup-folder shortcut. Returns the path to the
@@ -48,6 +50,9 @@ pub fn install(args: &AutostartArgs) -> Result<Option<PathBuf>> {
     let mut args_str = format!("--socks {}", shell_quote(&args.socks));
     if let Some(name) = &args.name {
         args_str.push_str(&format!(" --name {}", shell_quote(name)));
+    }
+    if let Some(screen) = args.screen {
+        args_str.push_str(&format!(" --screen {screen}"));
     }
 
     let mut sl = ShellLink::new(target)?;
@@ -69,6 +74,9 @@ pub fn install(args: &AutostartArgs) -> Result<Option<PathBuf>> {
     );
     if let Some(name) = &args.name {
         exec.push_str(&format!(" --name {}", shell_quote_linux(name)));
+    }
+    if let Some(screen) = args.screen {
+        exec.push_str(&format!(" --screen {screen}"));
     }
     let path = dir.join("catstage.desktop");
     let body = format!(
@@ -98,6 +106,10 @@ pub fn install(args: &AutostartArgs) -> Result<Option<PathBuf>> {
     if let Some(name) = &args.name {
         program_args.push_str("        <string>--name</string>\n");
         program_args.push_str(&format!("        <string>{}</string>\n", xml_escape(name)));
+    }
+    if let Some(screen) = args.screen {
+        program_args.push_str("        <string>--screen</string>\n");
+        program_args.push_str(&format!("        <string>{screen}</string>\n"));
     }
 
     let body = format!(
@@ -299,9 +311,11 @@ mod tests {
         let a = AutostartArgs {
             socks: "wss://x/r/y".into(),
             name: Some("kitchen".into()),
+            screen: Some(2),
         };
         assert!(a.socks.starts_with("wss://"));
         assert_eq!(a.name.as_deref(), Some("kitchen"));
+        assert_eq!(a.screen, Some(2));
     }
 
     // Linux install/uninstall round-trip under a sandboxed XDG_CONFIG_HOME so
@@ -327,6 +341,7 @@ mod tests {
         let path = install(&AutostartArgs {
             socks: "wss://example/r/test".into(),
             name: Some("kitchen".into()),
+            screen: Some(2),
         })
         .unwrap()
         .expect("Linux install should return Some(path)");
@@ -336,6 +351,7 @@ mod tests {
         // No shell metachars in either value, so no surrounding quotes.
         assert!(body.contains("--socks wss://example/r/test"));
         assert!(body.contains("--name kitchen"));
+        assert!(body.contains("--screen 2"));
         assert_eq!(is_installed().as_deref(), Some(path.as_path()));
 
         assert!(uninstall().unwrap());
@@ -362,6 +378,7 @@ mod tests {
         let r = install(&AutostartArgs {
             socks: "wss://x".into(),
             name: None,
+            screen: None,
         })
         .unwrap();
         assert!(r.is_none());
@@ -388,6 +405,7 @@ mod tests {
         let path = install(&AutostartArgs {
             socks: "wss://example/r/test".into(),
             name: Some("kitchen".into()),
+            screen: Some(2),
         })
         .unwrap()
         .expect("macOS install should return Some(path)");
@@ -399,6 +417,8 @@ mod tests {
         assert!(body.contains("<string>wss://example/r/test</string>"));
         assert!(body.contains("<string>--name</string>"));
         assert!(body.contains("<string>kitchen</string>"));
+        assert!(body.contains("<string>--screen</string>"));
+        assert!(body.contains("<string>2</string>"));
         assert!(body.contains("<key>RunAtLoad</key>"));
         assert_eq!(is_installed().as_deref(), Some(path.as_path()));
 

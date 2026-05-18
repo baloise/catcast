@@ -23,12 +23,24 @@ use tokio::sync::mpsc;
 use crate::scheduler;
 use crate::Shared as MainShared;
 
-/// The URL the window loaded on first paint — captured in `main.rs`'s setup
-/// callback and used by the on_page_load script (`build_escape_script` in
-/// main.rs) to bring the operator back to about from any external page.
-/// Platform-specific: typically `tauri://localhost/` on Linux/macOS or
-/// `http://tauri.localhost/` on Windows.
-pub struct AboutUrl(pub tauri::Url);
+/// Canonical in-memory target for "go to about" actions. Updated by `main.rs`
+/// when it sees a finished load of the bundled about page, and used by both
+/// the injected F1 handler and Rust-side Idle transitions.
+pub struct AboutUrl(pub Mutex<tauri::Url>);
+
+impl AboutUrl {
+    pub fn new(url: tauri::Url) -> Self {
+        Self(Mutex::new(url))
+    }
+
+    pub fn get(&self) -> tauri::Url {
+        self.0.lock().expect("AboutUrl poisoned").clone()
+    }
+
+    pub fn set(&self, url: tauri::Url) {
+        *self.0.lock().expect("AboutUrl poisoned") = url;
+    }
+}
 
 /// Shared runtime handles for the about page snapshot + the broker dispatch
 /// path. `make_snapshot` reads `shared`/`broker_url`/`stage_name`; the
@@ -37,9 +49,16 @@ pub struct AboutUrl(pub tauri::Url);
 /// wire the socks inbound dispatch closure.
 pub struct TauriCtx {
     pub shared: Arc<Mutex<MainShared>>,
+    /// Human-readable broker location for the about-page snapshot. Online
+    /// stages expose the actual `wss://...` URL; offline modes carry the
+    /// sentinel `"(offline)"`.
     pub broker_url: String,
+    /// True when catstage was started with `--offline` or `--url` — no broker
+    /// task is spawned and the about page should make the operator aware.
+    pub offline: bool,
     pub sched_tx: mpsc::Sender<scheduler::Cmd>,
     pub stage_name: String,
+    pub screen: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -53,6 +72,7 @@ pub struct FileEntry {
 pub struct Snapshot {
     pub state: State,
     pub broker_url: String,
+    pub offline: bool,
     pub stage_name: String,
     pub files: Vec<FileEntry>,
     pub autostart_path: Option<String>,
@@ -63,6 +83,7 @@ pub fn make_snapshot(ctx: &TauriCtx) -> Snapshot {
     Snapshot {
         state,
         broker_url: ctx.broker_url.clone(),
+        offline: ctx.offline,
         stage_name: ctx.stage_name.clone(),
         files: file_entries(),
         autostart_path: crate::autostart::is_installed().map(|p| p.display().to_string()),
@@ -134,6 +155,23 @@ pub async fn enter_idle(ctx: tauri::State<'_, TauriCtx>) -> Result<(), String> {
         .send(scheduler::Cmd::Idle)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Resume scheduler playback from the about page. Bound to the page-local
+/// F2 shortcut so an operator can leave Idle without needing a separate CLI.
+#[tauri::command]
+pub async fn enter_play(ctx: tauri::State<'_, TauriCtx>) -> Result<(), String> {
+    ctx.sched_tx
+        .send(scheduler::Cmd::Play)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Exit the catstage process when confirmed by the about page.
+#[tauri::command]
+pub async fn request_exit(app: tauri::AppHandle) -> Result<(), String> {
+    app.exit(0);
+    Ok(())
 }
 
 /// Push the latest snapshot to the about page (via Tauri event). Called

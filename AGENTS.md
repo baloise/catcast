@@ -14,6 +14,12 @@ for the full dev guide; this file is the short version for AI tooling.
 CI runs these on Ubuntu, Windows, and macOS — match all four locally
 before opening a PR.
 
+## When you finish a task
+
+Run `cargo fmt --all` before handing off (or committing). The
+`fmt --check` step above is the CI gate; running `--all` once at the end
+keeps subsequent diffs noise-free.
+
 ## Commit style
 
 Conventional Commits (`feat:`, `fix:`, `refactor:`, `docs:`, `chore:`,
