@@ -40,7 +40,7 @@ the corp network.
        the screen). The CLI now caches an Argon2id-derived key per stage.
     4. `catc targets list --probe` confirms which configured stages reply.
 - **Broker URL is not a security boundary** in this design. It can be a
-  friendly path (`/r/baloise-floor-3`). Anyone who knows it sees only
+  friendly path (`/r/lobby-display`). Anyone who knows it sees only
   ciphertext.
 - **Argon2id KDF** still earns its keep: hostnames are low-entropy and
   guessable; the slow KDF turns "guess hostnames offline against a captured

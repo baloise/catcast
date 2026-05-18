@@ -1,6 +1,6 @@
 # Corp-proxy probe.
 #
-# Run from a real Baloise / corp-network Windows machine:
+# Run from a real corp-network Windows machine:
 #
 #     .\probe.ps1 | Tee-Object -FilePath probe-results.txt
 #

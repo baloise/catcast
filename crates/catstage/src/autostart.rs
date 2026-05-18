@@ -3,7 +3,7 @@
 //! Windows  — `.lnk` in `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`.
 //! Linux    — `~/.config/autostart/catstage.desktop` (XDG; honoured by GNOME,
 //!            KDE, XFCE, LXQt and most other session managers).
-//! macOS    — `~/Library/LaunchAgents/ch.helvetia.catcast.catstage.plist`
+//! macOS    — `~/Library/LaunchAgents/dev.catcast.app.catstage.plist`
 //!            (per-user LaunchAgent; launchd loads it at next login).
 //!
 //! All paths target the *per-user* autostart location; no admin / sudo
@@ -277,7 +277,7 @@ fn shell_quote_linux(s: &str) -> String {
 }
 
 #[cfg(target_os = "macos")]
-const LAUNCH_AGENT_LABEL: &str = "ch.helvetia.catcast.catstage";
+const LAUNCH_AGENT_LABEL: &str = "dev.catcast.app.catstage";
 
 #[cfg(target_os = "macos")]
 fn macos_launch_agents_dir() -> Result<PathBuf> {
@@ -412,7 +412,7 @@ mod tests {
         assert!(path.exists());
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.contains("<key>Label</key>"));
-        assert!(body.contains("<string>ch.helvetia.catcast.catstage</string>"));
+        assert!(body.contains("<string>dev.catcast.app.catstage</string>"));
         assert!(body.contains("<string>--socks</string>"));
         assert!(body.contains("<string>wss://example/r/test</string>"));
         assert!(body.contains("<string>--name</string>"));
