@@ -211,7 +211,7 @@ After the tag lands on origin, watch the **release** workflow in
 Actions — the GitHub Release appears once all three OS matrix jobs
 finish.
 
-## Vibe
+## Yes we will
 
 If you've ever wanted to add something to a piece of software but the
 project's contribution process made it not worth it — please don't let
