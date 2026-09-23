@@ -39,7 +39,7 @@ Only `https://` upstreams are proxied.
 ## Local development
 
 ```bash
-cd workers/catproxy && npm install
+cd workers/catproxy && bun install   # or npm install
 printf 'ALLOW_HOSTS=pages.example.com,*.cdn.example\nDEFAULT_URL=https://pages.example.com/board.html\n' > .dev.vars
 npm run dev                 # wrangler dev, http://localhost:8787
 curl -sI localhost:8787/https://pages.example.com/board.html
