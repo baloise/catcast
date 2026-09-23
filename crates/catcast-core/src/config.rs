@@ -75,7 +75,8 @@ impl RotationEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FixedEntry {
-    /// 5- or 6-field cron expression accepted by the `cron` crate.
+    /// 5- or 6-field cron expression accepted by the `cron` crate,
+    /// evaluated in the stage machine's local time zone.
     pub cron: String,
     pub url: String,
     /// Duration string parsable by `humantime`.

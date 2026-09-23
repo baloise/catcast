@@ -48,7 +48,8 @@ fn parse_duration_secs(s) {
         if ch >= '0' && ch <= '9' { n += ch; } else { unit += ch; }
     }
     let v = parse_int(n);
-    switch unit.trim() {
+    unit.trim(); // trims in place; returns ()
+    switch unit {
         "s" => v,
         "m" => v * 60,
         "h" => v * 3600,

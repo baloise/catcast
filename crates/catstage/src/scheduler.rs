@@ -15,10 +15,10 @@
 //! The scheduler emits each new "current URL" via a callback so the rest of
 //! the binary can update [`State::current_url`] and notify the CLI.
 
-use crate::logic::{LogicHandle, Plan};
+use crate::logic::{CronJob, LogicHandle, Plan};
 use catcast_core::config::parse_cron;
 use catcast_core::Mode;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -111,6 +111,8 @@ struct Runtime {
     /// URL last announced via `on_url_change`. Used so we don't spam the
     /// event sink when nothing actually changed.
     last_url: Option<String>,
+    /// Cron occurrences up to this wall-clock time have been handled.
+    cron_checked: DateTime<Local>,
 }
 
 impl Runtime {
@@ -121,6 +123,7 @@ impl Runtime {
             mode: Mode::Playing,
             one_shot_until: None,
             last_url: None,
+            cron_checked: Local::now(),
         }
     }
 }
@@ -145,8 +148,8 @@ async fn run(
         let now = Instant::now();
         let slot_deadline = slot_started + slot_duration;
         let one_shot_deadline = rt.one_shot_until;
-        let cron_deadline = next_cron_fire(&rt).map(|dt| {
-            let ms = (dt - Utc::now()).num_milliseconds().max(0) as u64;
+        let cron_deadline = next_cron_fire(&rt.plan.cron, rt.cron_checked).map(|dt| {
+            let ms = (dt - Local::now()).num_milliseconds().max(0) as u64;
             now + Duration::from_millis(ms)
         });
 
@@ -166,6 +169,7 @@ async fn run(
                         rt.plan = new_plan;
                         rt.idx = 0;
                         rt.one_shot_until = None;
+                        rt.cron_checked = Local::now();
                         slot_started = Instant::now();
                         slot_duration = current_slot_duration(&rt);
                         announce_current(&rt, &events);
@@ -189,6 +193,11 @@ async fn run(
                         set_mode(&mut rt, Mode::Paused, &events, &mut slot_started, &mut slot_duration);
                     }
                     Cmd::Play => {
+                        // Play also ends a timed nav early (e.g. a coffee
+                        // break), so rotation advances again right away.
+                        rt.one_shot_until = None;
+                        slot_started = Instant::now();
+                        slot_duration = current_slot_duration(&rt);
                         set_mode(&mut rt, Mode::Playing, &events, &mut slot_started, &mut slot_duration);
                         // Re-announce the current rotation URL so the kiosk
                         // navigates away from whatever it was held on.
@@ -229,17 +238,19 @@ async fn run(
                         continue;
                     }
                 }
-                // Cron tick?
-                if let Some(dt) = next_cron_fire(&rt) {
-                    let cron_at_std =
-                        now + Duration::from_millis((dt - Utc::now()).num_milliseconds().max(0) as u64);
-                    if cron_at_std <= now + Duration::from_millis(50) {
-                        fire_cron(&rt, &logic);
-                        // After firing, rebuild slot timing.
-                        slot_started = Instant::now();
-                        slot_duration = current_slot_duration(&rt);
-                        continue;
+                // Cron tick? Fire every job with an occurrence since the last
+                // check, then feed its nav/pause/play side-effects in.
+                let wall_now = Local::now();
+                let due = due_jobs(&rt.plan.cron, rt.cron_checked, wall_now);
+                rt.cron_checked = wall_now;
+                if !due.is_empty() {
+                    let actions = fire_cron(&rt.plan.cron, &due, &logic);
+                    slot_started = Instant::now();
+                    slot_duration = current_slot_duration(&rt);
+                    for action in actions {
+                        apply_nav_action(&mut rt, action, &events, &mut slot_started, &mut slot_duration);
                     }
+                    continue;
                 }
                 // Otherwise: advance rotation (unless not playing / one-shot / empty).
                 if rt.mode == Mode::Playing
@@ -333,43 +344,48 @@ fn emit_url(rt: &mut Runtime, url: &str, events: &Arc<dyn Events>) {
     events.on_url_change(url);
 }
 
-fn next_cron_fire(rt: &Runtime) -> Option<DateTime<Utc>> {
-    let mut earliest: Option<DateTime<Utc>> = None;
-    for job in &rt.plan.cron {
-        let Ok(schedule) = parse_cron(&job.cron) else {
-            continue;
-        };
-        if let Some(next) = schedule.upcoming(Utc).next() {
-            earliest = Some(match earliest {
-                Some(prev) if prev < next => prev,
-                _ => next,
-            });
-        }
-    }
-    earliest
+/// Earliest cron occurrence strictly after `after`, across all jobs.
+fn next_cron_fire(jobs: &[CronJob], after: DateTime<Local>) -> Option<DateTime<Local>> {
+    jobs.iter()
+        .filter_map(|job| parse_cron(&job.cron).ok()?.after(&after).next())
+        .min()
 }
 
-fn fire_cron(rt: &Runtime, logic: &Option<Arc<Mutex<Option<LogicHandle>>>>) {
-    let Some(handle_arc) = logic else { return };
+/// Indices of jobs with an occurrence in `(after, until]`.
+fn due_jobs(jobs: &[CronJob], after: DateTime<Local>, until: DateTime<Local>) -> Vec<usize> {
+    jobs.iter()
+        .enumerate()
+        .filter(|(_, job)| {
+            parse_cron(&job.cron)
+                .ok()
+                .and_then(|s| s.after(&after).next())
+                .is_some_and(|next| next <= until)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Run the due jobs' callbacks and collect their navigation side-effects.
+fn fire_cron(
+    jobs: &[CronJob],
+    due: &[usize],
+    logic: &Option<Arc<Mutex<Option<LogicHandle>>>>,
+) -> Vec<crate::logic::NavAction> {
+    let Some(handle_arc) = logic else {
+        return Vec::new();
+    };
     let guard = handle_arc.lock().expect("logic mutex poisoned");
-    let Some(handle) = guard.as_ref() else { return };
-    // Find which job(s) are due *right now* (within ~1s tolerance).
-    let now = Utc::now();
-    for job in &rt.plan.cron {
-        let Ok(schedule) = parse_cron(&job.cron) else {
-            continue;
-        };
-        if let Some(next) = schedule.upcoming(Utc).next() {
-            if (next - now).num_seconds().abs() <= 1 {
-                let collector = Arc::new(Mutex::new(Plan::default()));
-                let _ = handle.call(&job.fn_name, collector);
-                // NOTE: we deliberately don't push the closure's side-effects
-                // back into the scheduler here — the simpler v1 design is
-                // that the *next* `SetLogic` rebuild captures cron effects
-                // at evaluation time (see logic.rs::register_host_fns).
-            }
+    let Some(handle) = guard.as_ref() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for &i in due {
+        match handle.fire(&jobs[i].callback) {
+            Ok(actions) => out.extend(actions),
+            Err(e) => eprintln!("catstage: cron job {:?} failed: {e:#}", jobs[i].cron),
         }
     }
+    out
 }
 
 #[cfg(test)]
@@ -515,5 +531,68 @@ mod tests {
             "expected re-announce on Play: {urls:?}"
         );
         let _ = tx.send(Cmd::Shutdown).await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn play_ends_timed_nav_early() {
+        let coll = Arc::new(Collector::default());
+        let tx = spawn(plan_two_urls(), None, coll.clone());
+        tokio::time::advance(Duration::from_millis(50)).await;
+        tx.send(Cmd::TimedNav {
+            url: "https://coffee/".into(),
+            secs: 1800,
+        })
+        .await
+        .unwrap();
+        tokio::time::advance(Duration::from_millis(100)).await;
+        tx.send(Cmd::Play).await.unwrap();
+        tokio::time::advance(Duration::from_millis(100)).await;
+        // Rotation must advance again within a couple of 1s slots, long
+        // before the 30-minute timer would have run out.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        let urls = coll.urls.lock().unwrap().clone();
+        let after_coffee: Vec<_> = urls
+            .iter()
+            .skip_while(|u| *u != "https://coffee/")
+            .skip(1)
+            .collect();
+        assert!(
+            after_coffee.len() >= 2,
+            "rotation stayed frozen after Play: {urls:?}"
+        );
+        let _ = tx.send(Cmd::Shutdown).await;
+    }
+
+    fn job(cron: &str) -> CronJob {
+        CronJob {
+            cron: cron.into(),
+            callback: crate::logic::CronCallback::Named("f".into()),
+        }
+    }
+
+    fn local(y: i32, m: u32, d: u32, h: u32, min: u32, s: u32, ms: u32) -> DateTime<Local> {
+        use chrono::TimeZone;
+        Local.with_ymd_and_hms(y, m, d, h, min, s).unwrap()
+            + chrono::Duration::milliseconds(ms.into())
+    }
+
+    #[test]
+    fn due_jobs_matches_local_weekday_window() {
+        let jobs = [job("0 11 * * MON-FRI")];
+        // 2026-09-21 is a Monday, 2026-09-26 a Saturday.
+        let mon = |h, min, s, ms| local(2026, 9, 21, h, min, s, ms);
+        let sat = |h, min, s, ms| local(2026, 9, 26, h, min, s, ms);
+        assert_eq!(
+            due_jobs(&jobs, mon(10, 59, 59, 0), mon(11, 0, 0, 500)),
+            vec![0]
+        );
+        assert!(due_jobs(&jobs, sat(10, 59, 59, 0), sat(11, 0, 0, 500)).is_empty());
+        assert!(due_jobs(&jobs, mon(11, 0, 1, 0), mon(11, 5, 0, 0)).is_empty());
+        assert_eq!(
+            next_cron_fire(&jobs, sat(12, 0, 0, 0)),
+            Some(local(2026, 9, 28, 11, 0, 0, 0))
+        );
     }
 }

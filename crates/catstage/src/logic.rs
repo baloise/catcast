@@ -10,8 +10,9 @@
 //! - `nav(url)` / `nav(url, secs)` — immediate navigation, optionally with
 //!   auto-resume after `secs`.
 //! - `pause()` / `play()` — toggle the `paused` flag.
-//! - `schedule(cron_expr, fn_name)` — schedule the named Rhai function (no
-//!   args) to run on every cron tick.
+//! - `schedule(cron_expr, fn_name)` / `schedule(cron_expr, closure)` — run
+//!   the named Rhai function (or the closure) on every cron tick. Cron is
+//!   evaluated in the stage machine's local time zone.
 //!
 //! The host functions write into a [`Plan`] that the scheduler consumes. The
 //! engine is sticky: once `eval` finishes, the registered closures keep
@@ -20,7 +21,7 @@
 
 use anyhow::{Context, Result};
 use catcast_core::Config;
-use rhai::{Array, Dynamic, Engine, Map, Scope, AST};
+use rhai::{Array, Dynamic, Engine, FnPtr, Map, Scope, AST};
 use std::sync::{Arc, Mutex};
 
 /// What a logic eval produces: a rotation ring + a list of cron-driven calls.
@@ -45,7 +46,17 @@ pub struct RotationItem {
 #[derive(Debug, Clone)]
 pub struct CronJob {
     pub cron: String,
-    pub fn_name: String,
+    pub callback: CronCallback,
+}
+
+/// What a cron tick invokes.
+#[derive(Debug, Clone)]
+pub enum CronCallback {
+    /// A top-level script function, looked up by name.
+    Named(String),
+    /// A function pointer / closure. Captured variables travel as curried
+    /// arguments, so `|| nav(url, secs)` keeps its `url` and `secs`.
+    Closure(FnPtr),
 }
 
 #[derive(Debug, Clone)]
@@ -64,35 +75,34 @@ pub enum NavAction {
 }
 
 /// A handle the scheduler holds onto so it can fire cron-scheduled Rhai
-/// callbacks later. Created by [`evaluate`]. We keep the source instead of
-/// the engine — Rhai's `Engine` isn't `Clone`, and building a fresh one per
-/// cron tick is microsecond-cheap.
+/// callbacks later. Created by [`evaluate`]. We keep the AST instead of the
+/// engine — Rhai's `Engine` isn't `Clone`, and building a fresh one per cron
+/// tick is microsecond-cheap.
 pub struct LogicHandle {
-    src: String,
     ast: AST,
 }
 
 impl LogicHandle {
-    /// Invoke a previously-`schedule()`-registered Rhai function. The plan
-    /// captures `fn_name`s the script declared; cron ticks call them by name.
-    /// Side-effects (nav, pause, play) populate the supplied collector.
-    pub fn call(&self, fn_name: &str, collector: Arc<Mutex<Plan>>) -> Result<()> {
-        // Re-register host fns bound to the supplied collector so the script's
-        // body can call `nav`, `pause`, `play` etc. and the scheduler sees them.
+    /// Invoke a `schedule()`-registered callback and return the navigation
+    /// side-effects (nav, pause, play) it produced, in call order.
+    pub fn fire(&self, callback: &CronCallback) -> Result<Vec<NavAction>> {
+        // Fresh host fns bound to a fresh collector, so only this tick's
+        // side-effects come back.
+        let collector = Arc::new(Mutex::new(Plan::default()));
         let mut engine = make_engine();
-        register_host_fns(&mut engine, collector);
-        // Recompile so the AST is bound to the fresh engine.
-        let ast = engine
-            .compile(&self.src)
-            .with_context(|| "recompiling Rhai source for cron call")?;
-        let mut scope = Scope::new();
-        engine
-            .call_fn::<()>(&mut scope, &ast, fn_name, ())
-            .with_context(|| format!("calling Rhai fn {fn_name}"))?;
-        // ast field exists to keep the original handle small; reused only for
-        // the type's lifetime guarantees, not directly here.
-        let _ = &self.ast;
-        Ok(())
+        register_host_fns(&mut engine, Arc::clone(&collector));
+        match callback {
+            CronCallback::Named(name) => engine
+                .call_fn::<Dynamic>(&mut Scope::new(), &self.ast, name, ())
+                .map(|_| ())
+                .with_context(|| format!("calling Rhai fn {name}"))?,
+            CronCallback::Closure(fnptr) => fnptr
+                .call::<Dynamic>(&engine, &self.ast, ())
+                .map(|_| ())
+                .with_context(|| format!("calling Rhai closure {}", fnptr.fn_name()))?,
+        }
+        let actions = std::mem::take(&mut collector.lock().expect("plan mutex poisoned").one_shot);
+        Ok(actions)
     }
 }
 
@@ -151,13 +161,7 @@ pub fn evaluate(rhai_src: &str, cfg: &Config) -> Result<(Plan, LogicHandle)> {
         .context("calling Rhai run(cfg)")?;
 
     let final_plan = plan.lock().expect("plan mutex poisoned").clone();
-    Ok((
-        final_plan,
-        LogicHandle {
-            src: rhai_src.to_string(),
-            ast,
-        },
-    ))
+    Ok((final_plan, LogicHandle { ast }))
 }
 
 fn register_host_fns(engine: &mut Engine, collector: Arc<Mutex<Plan>>) {
@@ -221,42 +225,25 @@ fn register_host_fns(engine: &mut Engine, collector: Arc<Mutex<Plan>>) {
             .push(NavAction::Play);
     });
 
-    // schedule(cron_expr, fn_name): we don't try to capture Rhai closures —
-    // the script names the callback and the scheduler invokes it by name on
-    // each cron tick. `default.rhai` already passes a closure for simplicity;
-    // we support both by detecting a string vs. callable. For closures we
-    // synthesise a stable name and store the closure in a side table — but
-    // that's more machinery than we need; we instead document that the
-    // default-logic should use string fn names.
+    // schedule(cron_expr, fn_name): the scheduler invokes the named script
+    // function on each cron tick.
     let c = Arc::clone(&collector);
     engine.register_fn("schedule", move |cron: &str, fn_name: &str| {
         c.lock().expect("plan mutex poisoned").cron.push(CronJob {
             cron: cron.to_string(),
-            fn_name: fn_name.to_string(),
+            callback: CronCallback::Named(fn_name.to_string()),
         });
     });
-    // schedule(cron_expr, anonymous_fn): accept a Rhai function-pointer
-    // (`FnPtr`) so existing default-logic that passes `|| nav(url, secs)`
-    // keeps working. We name the slot synthetically so a later cron tick can
-    // re-eval the closure via `LogicHandle::call`. Since FnPtr doesn't carry
-    // captured environment outside the eval, we materialise the side-effects
-    // *right now* by calling it once with no args — adequate for the v1
-    // default-logic which immediately calls `nav(...)`.
+    // schedule(cron_expr, closure): `default.rhai` passes `|| nav(url, secs)`.
+    // Store the function pointer only — it runs on the cron tick, never at
+    // eval time (otherwise every `fixed` entry would show on config load).
     let c = Arc::clone(&collector);
-    engine.register_fn(
-        "schedule",
-        move |context: rhai::NativeCallContext, cron: &str, fnptr: rhai::FnPtr| {
-            // Snapshot whatever side-effects the closure produces.
-            let _ = fnptr.call_within_context::<Dynamic>(&context, ());
-            // Still record the cron entry so the scheduler will *also* fire
-            // it on the next match. We use the fn-pointer's fn_name as the
-            // dispatch key; for anonymous closures Rhai picks a stable name.
-            c.lock().expect("plan mutex poisoned").cron.push(CronJob {
-                cron: cron.to_string(),
-                fn_name: fnptr.fn_name().to_string(),
-            });
-        },
-    );
+    engine.register_fn("schedule", move |cron: &str, fnptr: FnPtr| {
+        c.lock().expect("plan mutex poisoned").cron.push(CronJob {
+            cron: cron.to_string(),
+            callback: CronCallback::Closure(fnptr),
+        });
+    });
 }
 
 #[cfg(test)]
@@ -312,5 +299,53 @@ rotation:
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn default_logic_fixed_entry_fires_only_on_tick() {
+        let cfg = Config::from_yaml(
+            r#"
+version: 1
+rotation:
+  default_duration: 30s
+  urls:
+    - https://a/
+fixed:
+  - cron: "0 11 * * MON-FRI"
+    url: https://menu/
+    duration: 60m
+"#,
+        )
+        .unwrap();
+        let src = include_str!("../../../default-logic/default.rhai");
+        let (plan, handle) = evaluate(src, &cfg).unwrap();
+        // Nothing may navigate at load time...
+        assert!(plan.one_shot.is_empty(), "{:?}", plan.one_shot);
+        assert_eq!(plan.cron.len(), 1);
+        assert_eq!(plan.cron[0].cron, "0 11 * * MON-FRI");
+        // ...only when the tick fires, with the captured url + secs.
+        let actions = handle.fire(&plan.cron[0].callback).unwrap();
+        match actions.as_slice() {
+            [NavAction::NavTimed { url, secs }] => {
+                assert_eq!(url, "https://menu/");
+                assert_eq!(*secs, 3600);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn named_schedule_callback_fires() {
+        let logic = r#"
+            fn menu() { nav("https://menu/"); }
+            fn run(cfg) { schedule("0 11 * * *", "menu"); }
+        "#;
+        let (plan, handle) = evaluate(logic, &cfg_basic()).unwrap();
+        assert!(plan.one_shot.is_empty());
+        let actions = handle.fire(&plan.cron[0].callback).unwrap();
+        assert!(
+            matches!(actions.as_slice(), [NavAction::Nav { url }] if url == "https://menu/"),
+            "{actions:?}"
+        );
     }
 }

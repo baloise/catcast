@@ -11,7 +11,8 @@ rotation:
       duration: 15s
 
 # Fixed-time entries override the rotation while they are active. The cron
-# expression is standard 5-field: `min hour day-of-month month day-of-week`.
+# expression is standard 5-field: `min hour day-of-month month day-of-week`,
+# evaluated in the stage machine's local time zone.
 # Optional 6-field (with leading second) and 7-field (with trailing year) are
 # also accepted.
 fixed:
