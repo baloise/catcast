@@ -13,6 +13,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: workers/catproxy/package-lock.json
+      # Install the pinned wrangler so wrangler-action uses it instead of an
+      # ad-hoc `npx wrangler@x`, which recent npm refuses non-interactively.
+      - run: npm ci
+        working-directory: workers/catproxy
       # Deployment-specific values come from repository *variables*, so the
       # repo itself stays free of any particular deployment's hosts.
       - uses: cloudflare/wrangler-action@v3
@@ -20,6 +29,7 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: workers/catproxy
+          packageManager: npm
           command: >-
             deploy
             --var 'ALLOW_HOSTS:${{ vars.CATPROXY_ALLOW_HOSTS }}'
