@@ -20,14 +20,18 @@ jobs:
       - run: bun install --frozen-lockfile
         working-directory: workers/catproxy
       # Deployment-specific values come from repository *variables*, so the
-      # repo itself stays free of any particular deployment's hosts.
+      # repo itself stays free of any particular deployment's hosts. They are
+      # handed to wrangler through the action's `vars` input (no shell quoting).
       - uses: cloudflare/wrangler-action@v3
+        env:
+          ALLOW_HOSTS: ${{ vars.CATPROXY_ALLOW_HOSTS }}
+          DEFAULT_URL: ${{ vars.CATPROXY_DEFAULT_URL }}
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: workers/catproxy
           packageManager: bun
-          command: >-
-            deploy
-            --var 'ALLOW_HOSTS:${{ vars.CATPROXY_ALLOW_HOSTS }}'
-            --var 'DEFAULT_URL:${{ vars.CATPROXY_DEFAULT_URL }}'
+          command: deploy
+          vars: |
+            ALLOW_HOSTS
+            DEFAULT_URL
