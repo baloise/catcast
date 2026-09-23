@@ -1,0 +1,26 @@
+name: proxy-deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "workers/catproxy/**"
+      - ".github/workflows/proxy-deploy.yml"
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Deployment-specific values come from repository *variables*, so the
+      # repo itself stays free of any particular deployment's hosts.
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: workers/catproxy
+          command: >-
+            deploy
+            --var 'ALLOW_HOSTS:${{ vars.CATPROXY_ALLOW_HOSTS }}'
+            --var 'DEFAULT_URL:${{ vars.CATPROXY_DEFAULT_URL }}'

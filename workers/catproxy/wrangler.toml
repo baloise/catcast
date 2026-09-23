@@ -1,0 +1,9 @@
+name = "catproxy"
+main = "src/index.js"
+compatibility_date = "2024-12-01"
+
+# Deployment-specific configuration is deliberately NOT committed. Set the
+# Worker variables ALLOW_HOSTS (required) and DEFAULT_URL (optional) via
+#   wrangler deploy --var 'ALLOW_HOSTS:host-a,*.host-b' --var 'DEFAULT_URL:https://host-a/page.html'
+# or the Cloudflare dashboard. For `wrangler dev`, put them in a local
+# `.dev.vars` file (git-ignored). See README.md.

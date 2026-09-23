@@ -1,0 +1,14 @@
+{
+  "name": "catproxy",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "dev:node": "node scripts/serve-node.mjs",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@miniflare/html-rewriter": "^2.14.4",
+    "wrangler": "^4.0.0"
+  }
+}

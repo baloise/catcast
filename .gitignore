@@ -12,6 +12,9 @@ crates/catstage/gen/
 crates/catsocks/build
 crates/catsocks/.wrangler
 crates/catsocks/node_modules
+workers/catproxy/.wrangler
+workers/catproxy/.dev.vars
+workers/catproxy/node_modules
 
 # OS / editor
 .DS_Store
