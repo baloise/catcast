@@ -97,9 +97,170 @@ impl Freshness {
     }
 }
 
+/// Release asset name for a stage platform tag (`windows-x64` → `.exe`).
+pub fn asset_name(platform: &str) -> String {
+    let ext = if platform.starts_with("windows") {
+        ".exe"
+    } else {
+        ""
+    };
+    format!("catstage-{platform}{ext}")
+}
+
+pub fn asset_url(base: &str, version: &Version, platform: &str) -> String {
+    format!(
+        "{}/releases/download/v{version}/{}",
+        base.trim_end_matches('/'),
+        asset_name(platform)
+    )
+}
+
+/// The same asset through catproxy's base64 route.
+pub fn proxied_url(proxy: &str, raw: &str) -> String {
+    format!("{}/b64/{raw}", proxy.trim_end_matches('/'))
+}
+
+/// First 64-hex token of a `sha256sum`-style line (or a bare hash).
+pub fn parse_sha256(text: &str) -> Option<String> {
+    text.split_whitespace()
+        .find(|t| t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(|t| t.to_ascii_lowercase())
+}
+
+/// Fetch `<asset>.sha256` published next to the release asset.
+pub async fn fetch_sha256(base: &str, version: &Version, platform: &str) -> Result<String> {
+    let url = format!("{}.sha256", asset_url(base, version, platform));
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .user_agent(concat!("catc/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .context("build http client")?;
+    let res = client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    if res.status().as_u16() == 404 {
+        bail!(
+            "{url} not found — releases before the checksum sidecars cannot be pushed remotely; \
+             download the binary yourself and pass --url/--sha256"
+        );
+    }
+    let res = res
+        .error_for_status()
+        .with_context(|| format!("GET {url}"))?;
+    let body = res.text().await.with_context(|| format!("read {url}"))?;
+    parse_sha256(&body).ok_or_else(|| anyhow!("{url}: no sha256 in {body:?}"))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Decision {
+    Update,
+    Skip(String),
+}
+
+/// Whether a stage should receive `target`, given what its last `State`
+/// said. Policy lives here, on the operator side: the stage itself accepts
+/// whatever an authenticated command names.
+pub fn plan_target(state: Option<&catcast_core::State>, target: &Version, force: bool) -> Decision {
+    let Some(st) = state else {
+        return Decision::Skip("offline (no reply)".into());
+    };
+    if st.platform.is_empty() {
+        return Decision::Skip(format!(
+            "v{} predates remote update — swap the binary by hand once",
+            st.version
+        ));
+    }
+    match freshness(&st.version, target) {
+        Freshness::Current if !force => {
+            Decision::Skip(format!("already v{target} (--force to reinstall)"))
+        }
+        Freshness::Ahead if !force => Decision::Skip(format!(
+            "would downgrade v{} → v{target} (--force to allow)",
+            st.version
+        )),
+        Freshness::Unknown if !force => Decision::Skip(format!(
+            "unrecognised version {:?} (--force to override)",
+            st.version
+        )),
+        _ => Decision::Update,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn state(version: &str, platform: &str) -> catcast_core::State {
+        let mut s = catcast_core::State::fresh("k", version);
+        s.platform = platform.into();
+        s
+    }
+
+    #[test]
+    fn asset_urls() {
+        let v = v("0.2.0");
+        assert_eq!(asset_name("windows-x64"), "catstage-windows-x64.exe");
+        assert_eq!(asset_name("linux-x64"), "catstage-linux-x64");
+        assert_eq!(
+            asset_url("https://github.com/baloise/catcast/", &v, "windows-x64"),
+            "https://github.com/baloise/catcast/releases/download/v0.2.0/catstage-windows-x64.exe"
+        );
+        assert_eq!(
+            proxied_url("https://p.workers.dev/", "https://github.com/x/y/f.exe"),
+            "https://p.workers.dev/b64/https://github.com/x/y/f.exe"
+        );
+    }
+
+    #[test]
+    fn sha256_lines() {
+        let h = "ab".repeat(32);
+        assert_eq!(
+            parse_sha256(&format!("{h}  catstage-linux-x64\n")),
+            Some(h.clone())
+        );
+        assert_eq!(parse_sha256(&h.to_uppercase()), Some(h.clone()));
+        assert_eq!(parse_sha256("not a hash"), None);
+        assert_eq!(parse_sha256(&"zz".repeat(32)), None);
+    }
+
+    #[test]
+    fn decision_table() {
+        let target = v("0.2.0");
+        assert!(matches!(
+            plan_target(None, &target, false),
+            Decision::Skip(_)
+        ));
+        assert!(matches!(
+            plan_target(Some(&state("0.1.0", "")), &target, true),
+            Decision::Skip(m) if m.contains("by hand")
+        ));
+        assert_eq!(
+            plan_target(Some(&state("0.1.0", "linux-x64")), &target, false),
+            Decision::Update
+        );
+        assert!(matches!(
+            plan_target(Some(&state("0.2.0", "linux-x64")), &target, false),
+            Decision::Skip(m) if m.contains("already")
+        ));
+        assert_eq!(
+            plan_target(Some(&state("0.2.0", "linux-x64")), &target, true),
+            Decision::Update
+        );
+        assert!(matches!(
+            plan_target(Some(&state("0.3.0", "linux-x64")), &target, false),
+            Decision::Skip(m) if m.contains("downgrade")
+        ));
+        assert_eq!(
+            plan_target(Some(&state("0.3.0", "linux-x64")), &target, true),
+            Decision::Update
+        );
+        assert!(matches!(
+            plan_target(Some(&state("dev", "linux-x64")), &target, false),
+            Decision::Skip(_)
+        ));
+    }
 
     fn v(s: &str) -> Version {
         Version::parse(s).unwrap()

@@ -25,6 +25,7 @@ mod logic;
 mod persist;
 mod scheduler;
 mod socks;
+mod update;
 
 use crate::about::TauriCtx;
 use crate::logic::{LogicHandle, Plan};
@@ -365,6 +366,7 @@ fn main() -> Result<()> {
                 connection: std::sync::Arc::new(AtomicU8::new(
                     crate::about::Connection::Unknown as u8,
                 )),
+                launch_args: std::env::args_os().skip(1).collect(),
             });
 
             let handle = app.handle().clone();
@@ -412,6 +414,10 @@ async fn bootstrap(
     socks_abort: Arc<tokio::sync::Notify>,
     sched_rx: tokio::sync::mpsc::Receiver<scheduler::Cmd>,
 ) -> Result<()> {
+    // Leftovers of a self-update (`catstage.exe.old` / `.new`) are removed
+    // once the previous process has certainly exited.
+    update::spawn_stale_cleanup();
+
     let initial_plan = match &mode {
         RunMode::Online { .. } | RunMode::Offline => {
             // Hydrate Shared from disk. Online and Offline both consume the
@@ -841,6 +847,69 @@ async fn dispatch(
             eprintln!("catstage: shutdown requested via broker");
             app.exit(0);
             None
+        }
+        Message::Update {
+            version,
+            url,
+            sha256,
+            encoding,
+        } => {
+            let req = update::Request {
+                version,
+                url,
+                sha256,
+                encoding,
+            };
+            match update::begin(&req) {
+                Err(e) => Some(Err(format!("update refused: {e:#}"))),
+                Ok((paths, file)) => {
+                    // Ack now: the download can take minutes and the CLI's
+                    // ordinary reply window is seconds. The terminal reply
+                    // follows from the task.
+                    broadcast(
+                        &out,
+                        Message::Reply {
+                            ok: true,
+                            message: format!("downloading v{} from {}", req.version, req.url),
+                        },
+                    );
+                    let launch_args = app
+                        .try_state::<crate::about::TauriCtx>()
+                        .map(|c| c.inner().launch_args.clone())
+                        .unwrap_or_default();
+                    let out = Arc::clone(&out);
+                    let app = app.clone();
+                    tokio::spawn(async move {
+                        let v = req.version.clone();
+                        match update::perform(req, paths, file, launch_args).await {
+                            Ok(()) => {
+                                // Same flush-then-exit choreography as Shutdown.
+                                broadcast(
+                                    &out,
+                                    Message::Reply {
+                                        ok: true,
+                                        message: format!("updated to v{v} — restarting"),
+                                    },
+                                );
+                                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                                eprintln!("catstage: exiting so v{v} can take over");
+                                app.exit(0);
+                            }
+                            Err(e) => {
+                                eprintln!("catstage: update failed: {e:#}");
+                                broadcast(
+                                    &out,
+                                    Message::Reply {
+                                        ok: false,
+                                        message: format!("update failed: {e:#}"),
+                                    },
+                                );
+                            }
+                        }
+                    });
+                    None
+                }
+            }
         }
         Message::State(_)
         | Message::Reply { .. }

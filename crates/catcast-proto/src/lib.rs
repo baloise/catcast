@@ -56,6 +56,16 @@ pub enum ProtoError {
     Replay { ts: i64, now: i64 },
 }
 
+/// How the body at [`Message::Update`]'s `url` is delivered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateEncoding {
+    /// The bytes of the binary as they are.
+    Raw,
+    /// Standard base64 text (catproxy's `/b64/` route); whitespace ignored.
+    Base64,
+}
+
 /// What the broker sees. Opaque to it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
@@ -130,6 +140,25 @@ pub enum Message {
     },
     /// Cleanly terminate the catstage process.
     Shutdown,
+    /// Replace the running catstage binary. The stage downloads `url`
+    /// (base64 text or raw bytes, per `encoding`), verifies the SHA-256,
+    /// swaps the file in beside itself, relaunches with its own original
+    /// arguments and exits. The URL is transport, the hash is the integrity
+    /// anchor, and the AEAD is the authorisation: only a PSK holder can send
+    /// this.
+    ///
+    /// Unlike every other command this yields TWO `Reply`s: an immediate ack
+    /// (or a single `ok=false` when validation fails and nothing will
+    /// happen), then a terminal one once the new process is alive or the
+    /// update was rolled back. The new process's unsolicited `State` is the
+    /// definitive "back up" signal.
+    Update {
+        version: String,
+        url: String,
+        /// Lowercase hex SHA-256 of the decoded binary.
+        sha256: String,
+        encoding: UpdateEncoding,
+    },
 
     // ─── Stage -> CLI ────────────────────────────────────────────────────
     /// Snapshot of the stage's current State. Sent unsolicited on connect
@@ -137,7 +166,8 @@ pub enum Message {
     State(catcast_core::State),
     /// Per-command outcome. Stages emit exactly one `Reply` for every
     /// command they receive (Pause, Play, Nav, AutostartInstall, …) so the
-    /// CLI knows whether the action landed. `ok=false` carries a
+    /// CLI knows whether the action landed; `Update` is the documented
+    /// exception with an ack followed by a terminal reply. `ok=false` carries a
     /// human-readable error string in `message`; `ok=true` may carry a
     /// short success note ("installed at /path", "shortcut removed",
     /// "paused", …) or an empty string when there is nothing useful to

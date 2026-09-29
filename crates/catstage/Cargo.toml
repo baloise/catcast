@@ -30,6 +30,9 @@ tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 rustls = { workspace = true }
 futures-util = { workspace = true }
+reqwest = { workspace = true }
+sha2 = "0.10"
+base64 = { workspace = true }
 
 rhai = { version = "1.21", features = ["sync"] }
 gethostname = "1"

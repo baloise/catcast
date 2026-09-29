@@ -62,6 +62,10 @@ pub struct TauriCtx {
     pub screen: Option<u32>,
     /// Socks link status for the about-page broker indicator.
     pub connection: Arc<AtomicU8>,
+    /// The process's own command line (minus argv[0]), so a self-update can
+    /// relaunch exactly what the operator (or the Startup shortcut) started.
+    /// Rebuilding it from the other fields would lose `--offline`/`--url`.
+    pub launch_args: Vec<std::ffi::OsString>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

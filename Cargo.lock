@@ -524,6 +524,7 @@ name = "catstage"
 version = "0.1.1"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "catcast-core",
  "catcast-net",
  "catcast-proto",
@@ -533,11 +534,13 @@ dependencies = [
  "futures-util",
  "gethostname",
  "mslnk",
+ "reqwest",
  "rhai",
  "rustls",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
  "tauri",
  "tauri-build",
  "tokio",

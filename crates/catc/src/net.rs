@@ -40,30 +40,49 @@ impl Broker {
         dur: Duration,
     ) -> Vec<(String, Plaintext)> {
         let mut out = Vec::new();
+        self.collect_until(keys, dur, |name, pt| {
+            out.push((name.to_string(), pt));
+            false
+        })
+        .await;
+        out
+    }
+
+    /// Like [`collect`](Self::collect), but hands each plaintext to `on_msg`
+    /// as it arrives and stops early once `on_msg` returns `true`. Returns
+    /// whether it stopped because `on_msg` said so (as opposed to the
+    /// deadline or a closed socket).
+    pub async fn collect_until<F>(
+        &mut self,
+        keys: &HashMap<String, Key>,
+        dur: Duration,
+        mut on_msg: F,
+    ) -> bool
+    where
+        F: FnMut(&str, Plaintext) -> bool,
+    {
         let deadline = tokio::time::Instant::now() + dur;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
-                break;
+                return false;
             }
-            match timeout(remaining, self.ws.next()).await {
-                Err(_) => break,
-                Ok(None) => break,
-                Ok(Some(Err(_))) => break,
-                Ok(Some(Ok(WsMessage::Text(t)))) => {
-                    for (name, key) in keys {
-                        if let Ok(pt) = decrypt(key, &t) {
-                            if &pt.target == name {
-                                out.push((name.clone(), pt));
-                                break;
-                            }
+            let text = match timeout(remaining, self.ws.next()).await {
+                Err(_) | Ok(None) | Ok(Some(Err(_))) => return false,
+                Ok(Some(Ok(WsMessage::Text(t)))) => t,
+                Ok(Some(Ok(_))) => continue, // ignore binary/ping/etc.
+            };
+            for (name, key) in keys {
+                if let Ok(pt) = decrypt(key, &text) {
+                    if &pt.target == name {
+                        if on_msg(name, pt) {
+                            return true;
                         }
+                        break;
                     }
                 }
-                Ok(Some(Ok(_))) => continue, // ignore binary/ping/etc.
             }
         }
-        out
     }
 
     pub async fn close(mut self) {

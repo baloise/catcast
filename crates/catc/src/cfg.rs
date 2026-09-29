@@ -24,6 +24,12 @@ pub struct CatcConfig {
     /// catc never talks to anything but the broker.
     #[serde(default = "default_update_url")]
     pub update_url: String,
+    /// catproxy origin (e.g. `https://catproxy.example.workers.dev`) that
+    /// stages download updates through, via its `/b64/` route, so a
+    /// content-sniffing corporate proxy sees text rather than an executable.
+    /// Unset: stages fetch the raw release asset directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_proxy: Option<String>,
     #[serde(default)]
     pub stages: Vec<Stage>,
 }
@@ -33,6 +39,7 @@ impl Default for CatcConfig {
         Self {
             socks: String::new(),
             update_url: default_update_url(),
+            update_proxy: None,
             stages: Vec::new(),
         }
     }

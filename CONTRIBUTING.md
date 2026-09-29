@@ -140,6 +140,11 @@ cargo run -p catc -- devtools on                             # remote DevTools
 cargo run -p catc -- autostart install                       # uses the stage's current --socks/--name
 cargo run -p catc -- autostart uninstall
 
+# Update the stage binary to the latest release (or --version vX.Y.Z).
+# Skips stages that are offline, already current, or too old to take the
+# command, and reports each stage through download → restart → back up.
+cargo run -p catc -- stage update
+
 # Clean shutdown:
 cargo run -p catc -- shutdown
 ```
@@ -173,6 +178,31 @@ The "latest release" lookup follows the `/releases/latest` redirect of
 `update_url` in `catc.toml` (default: this repository on GitHub; no API
 token, no JSON). It honours `HTTPS_PROXY`/`NO_PROXY` and trusts the OS
 certificate store. Set `update_url = ""` to switch it off entirely.
+
+`catc stage update` reads `<asset>.sha256` from the release, pins that
+hash into the encrypted command, and tells the stage where to download.
+With `update_proxy = "https://<your-catproxy>"` in `catc.toml` the stage
+fetches `<proxy>/b64/<asset url>` as base64 text (the worker's
+`ALLOW_HOSTS` must include `github.com,objects.githubusercontent.com`);
+without it, the raw asset URL. The stage keeps the replaced binary as
+`catstage.exe.old` until its next start, so a bad update is one rename
+away from undone.
+
+To exercise the whole path locally without a release, serve a rebuilt
+binary yourself and pin its hash:
+
+```bash
+cargo build -p catstage
+mkdir -p /tmp/upd && base64 -w0 target/debug/catstage > /tmp/upd/catstage.b64
+( cd /tmp/upd && python3 -m http.server 8000 ) &
+cargo run -p catc -- stage update --force --version "v$(cargo pkgid -p catstage | sed 's/.*[#@]//')" \
+    --url http://127.0.0.1:8000/catstage.b64 \
+    --sha256 "$(sha256sum target/debug/catstage | cut -d' ' -f1)"
+```
+
+The stage acks, downloads, swaps, relaunches; `stage list --probe` shows
+the new process, and `catstage.old` disappears from the binary's
+directory about 30 s after the restart.
 
 ### Cloudflare Worker deploy
 
