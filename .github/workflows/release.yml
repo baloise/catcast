@@ -52,6 +52,13 @@ jobs:
           mkdir -p dist
           cp "target/release/catstage${{ matrix.ext }}" "dist/catstage-${{ matrix.suffix }}${{ matrix.ext }}"
           cp "target/release/catc${{ matrix.ext }}"     "dist/catc-${{ matrix.suffix }}${{ matrix.ext }}"
+          # Per-asset checksum sidecars in `sha256sum` format. `catc stage
+          # update` pins the hash from here into the update command, so a
+          # stage only swaps in exactly what CI built.
+          cd dist
+          for f in catstage-* catc-*; do
+            if command -v sha256sum >/dev/null; then sha256sum "$f"; else shasum -a 256 "$f"; fi > "$f.sha256"
+          done
       - name: Stage MSI artifact (Windows)
         if: matrix.os == 'windows-latest'
         shell: bash
@@ -68,6 +75,7 @@ jobs:
           files: |
             dist/catstage-${{ matrix.suffix }}${{ matrix.ext }}
             dist/catc-${{ matrix.suffix }}${{ matrix.ext }}
+            dist/*.sha256
           generate_release_notes: true
       - name: Attach MSI to GitHub Release (Windows)
         if: startsWith(github.ref, 'refs/tags/') && matrix.os == 'windows-latest'
