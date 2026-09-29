@@ -43,7 +43,5 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: workers/catproxy/package-lock.json
-      - run: npm ci
+      # The tests import only the worker's own sources; nothing to install.
       - run: npm test
