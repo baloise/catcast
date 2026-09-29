@@ -8,6 +8,7 @@
 mod cfg;
 mod cli;
 mod net;
+mod release;
 
 use anyhow::Result;
 use clap::Parser;

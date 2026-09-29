@@ -37,6 +37,13 @@ base64 = "0.22"
 url = "2"
 zeroize = "1"
 
+# http (release lookup, update download). `rustls-no-provider` reuses the
+# ring provider both binaries install at startup and verifies against the OS
+# certificate store (what makes a corporate TLS-inspecting proxy work);
+# `system-proxy` honours HTTPS_PROXY / NO_PROXY.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "system-proxy", "stream"] }
+semver = "1"
+
 # async / ws
 tokio = { version = "1", features = [
     "rt-multi-thread",

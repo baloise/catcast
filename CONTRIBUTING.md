@@ -113,9 +113,14 @@ cargo run -p catc -- init --socks ws://127.0.0.1:8787/r/dev
 cargo run -p catc -- stage add kitchen
 
 # Round-trip a probe: catc sends an encrypted GetState, catstage
-# replies with State, catc decrypts and reports.
+# replies with State, catc decrypts and reports which stages answer,
+# which version/platform each runs, and whether a newer release exists.
 cargo run -p catc -- stage list --probe
-#   up    active  kitchen
+#   latest release: v0.1.1
+#   up    active  kitchen  v0.1.1  linux-x64  current
+
+# Just the version check (also works before any stage is registered):
+cargo run -p catc -- version
 
 # Push a default config + logic so the stage starts rotating.
 cargo run -p catc -- logic  import default-logic/default.rhai
@@ -163,6 +168,11 @@ cargo run -p catc -- init --socks ws://127.0.0.1:8787/r/dev
 
 To wipe an existing dev state on the stage side, delete
 `~/.config/catcast/{config.yaml,logic.rhai,state.json}`.
+
+The "latest release" lookup follows the `/releases/latest` redirect of
+`update_url` in `catc.toml` (default: this repository on GitHub; no API
+token, no JSON). It honours `HTTPS_PROXY`/`NO_PROXY` and trusts the OS
+certificate store. Set `update_url = ""` to switch it off entirely.
 
 ### Cloudflare Worker deploy
 

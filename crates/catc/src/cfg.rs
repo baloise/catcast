@@ -12,11 +12,34 @@ const CONFIG_FILE: &str = "catc.toml";
 const ALIASES_FILE: &str = "aliases.yaml";
 const CONFIG_ENV: &str = "CATC_CONFIG";
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Where releases are looked up when nothing else is configured.
+pub const DEFAULT_UPDATE_URL: &str = "https://github.com/baloise/catcast";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CatcConfig {
     pub socks: String,
+    /// Bare repository URL (no trailing slash) whose `/releases/latest`
+    /// redirect names the newest version. Used by `stage list --probe` and
+    /// `catc version`. An empty string disables every release lookup, so
+    /// catc never talks to anything but the broker.
+    #[serde(default = "default_update_url")]
+    pub update_url: String,
     #[serde(default)]
     pub stages: Vec<Stage>,
+}
+
+impl Default for CatcConfig {
+    fn default() -> Self {
+        Self {
+            socks: String::new(),
+            update_url: default_update_url(),
+            stages: Vec::new(),
+        }
+    }
+}
+
+fn default_update_url() -> String {
+    DEFAULT_UPDATE_URL.to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

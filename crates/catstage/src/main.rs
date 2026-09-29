@@ -425,6 +425,7 @@ async fn bootstrap(
                 let mut sh = shared.lock().unwrap();
                 sh.state.name = name.clone();
                 sh.state.version = env!("CARGO_PKG_VERSION").to_string();
+                sh.state.platform = catcast_core::platform_tag();
                 sh.config_yaml = config_yaml.clone();
                 sh.logic_rhai = logic_rhai.clone();
             }

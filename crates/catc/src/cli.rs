@@ -1,9 +1,11 @@
 use crate::cfg::{Aliases, CatcConfig, Stage};
 use crate::net::{keys_for, Broker};
+use crate::release;
 use anyhow::{anyhow, bail, Context, Result};
 use catcast_core::Config;
 use catcast_proto::Message;
 use clap::{Args, Parser, Subcommand};
+use std::collections::HashMap;
 use std::fs;
 use std::time::Duration;
 
@@ -87,6 +89,8 @@ pub enum Cmd {
     About(Targets),
     /// Cleanly stop the stage process.
     Shutdown(Targets),
+    /// Print catc's version and the latest published release.
+    Version,
 }
 
 #[derive(Subcommand)]
@@ -191,7 +195,8 @@ pub enum StageCmd {
     Deactivate(StageList),
     /// List configured stages.
     List {
-        /// Send a GetState to each and report which respond.
+        /// Send a GetState to each and report which respond, with the
+        /// version each one runs and whether a newer release exists.
         #[arg(long)]
         probe: bool,
     },
@@ -318,6 +323,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Cmd::About(t) => cmd_send(t, Message::NavAbout).await,
         Cmd::Shutdown(t) => cmd_send(t, Message::Shutdown).await,
+        Cmd::Version => cmd_version().await,
     }
 }
 
@@ -399,7 +405,6 @@ async fn cmd_send(t: Targets, msg: Message) -> Result<()> {
 /// reliably, so we use a longer collect window for that variant only.
 async fn cmd_send_many(t: Targets, msgs: Vec<Message>) -> Result<()> {
     use catcast_proto::Message::Reply;
-    use std::collections::HashMap;
     use std::time::Duration;
 
     let cfg = CatcConfig::load()?;
@@ -584,20 +589,65 @@ async fn cmd_targets_list(probe: bool) -> Result<()> {
         let key = keys.get(n).unwrap();
         br.send(key, n, &Message::GetState).await?;
     }
-    let replies = br.collect(&keys, Duration::from_secs(2)).await;
+    // The release lookup runs alongside the 2s reply window, so it adds no
+    // wall time. Failure only blanks the status column.
+    let (replies, latest) = tokio::join!(
+        br.collect(&keys, Duration::from_secs(2)),
+        release::lookup(&cfg.update_url)
+    );
     br.close().await;
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (name, _) in replies {
-        seen.insert(name);
+
+    // Anything that decrypts under a stage's key proves it is up; the State
+    // payload (when that is what came back) carries version + platform.
+    let mut seen: HashMap<String, Option<catcast_core::State>> = HashMap::new();
+    for (name, pt) in replies {
+        let slot = seen.entry(name).or_default();
+        if let Message::State(s) = pt.msg {
+            *slot = Some(s);
+        }
+    }
+
+    match &latest {
+        Some(Ok(v)) => println!("latest release: v{v}"),
+        Some(Err(e)) => println!("latest release: unavailable ({e:#})"),
+        None => {}
     }
     for s in &cfg.stages {
-        let live = if seen.contains(&s.name) {
-            "up  "
-        } else {
-            "down"
-        };
         let act = if s.active { "active" } else { "off   " };
-        println!("{live}\t{act}\t{}", s.name);
+        match seen.get(&s.name) {
+            None => println!("down\t{act}\t{}\t-\t-", s.name),
+            Some(None) => println!("up  \t{act}\t{}\t?\t?", s.name),
+            Some(Some(st)) => {
+                let platform = if st.platform.is_empty() {
+                    "-"
+                } else {
+                    st.platform.as_str()
+                };
+                let status = match &latest {
+                    Some(Ok(v)) => release::freshness(&st.version, v).label(v),
+                    _ => String::new(),
+                };
+                println!(
+                    "up  \t{act}\t{}\tv{}\t{platform}\t{status}",
+                    s.name, st.version
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_version() -> Result<()> {
+    let me = env!("CARGO_PKG_VERSION");
+    println!("catc v{me}");
+    let cfg = CatcConfig::load().unwrap_or_default();
+    match release::lookup(&cfg.update_url).await {
+        None => println!("release check disabled (update_url is empty)"),
+        Some(Err(e)) => println!("latest release: unavailable ({e:#})"),
+        Some(Ok(v)) => println!(
+            "latest release: v{v} ({})",
+            release::freshness(me, &v).label(&v)
+        ),
     }
     Ok(())
 }

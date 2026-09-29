@@ -4,4 +4,4 @@ pub mod config;
 pub mod state;
 
 pub use config::{Config, ConfigError, FixedEntry, RotationEntry, Warning};
-pub use state::{Mode, State};
+pub use state::{platform_tag, Mode, State};
