@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "wrangler dev",
     "dev:node": "node scripts/serve-node.mjs",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "test": "node --test \"test/**/*.test.mjs\""
   },
   "devDependencies": {
     "@miniflare/html-rewriter": "^2.14.4",

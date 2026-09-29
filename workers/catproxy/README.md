@@ -36,6 +36,25 @@ Set as Worker variables — nothing deployment-specific lives in this repo.
 
 Only `https://` upstreams are proxied.
 
+## `/b64/` — files as base64 text
+
+```
+https://<worker>/b64/https://github.com/baloise/catcast/releases/download/v0.1.1/catstage-windows-x64.exe
+```
+
+Streams the upstream body base64-encoded as `text/plain`. Corporate proxies
+that block executable downloads by sniffing the content see only text; the
+client decodes. `catc stage update` uses this to get release binaries onto
+kiosks. Redirects are followed (at most 5 hops, every hop checked against
+`ALLOW_HOSTS`); GitHub release downloads need both `github.com` and
+`objects.githubusercontent.com` allowed. Nothing from the client request is
+forwarded upstream. `x-catproxy-length` carries the decoded size when the
+upstream sent one. The encoded body is cached at the edge for an hour, keyed
+by the worker URL, so each PoP transcodes a file once — on the Workers free
+plan the first, uncached request for a large file may exceed the CPU budget.
+
+Tests: `npm test` (plain `node --test`, no network).
+
 ## Local development
 
 ```bash

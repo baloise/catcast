@@ -12,7 +12,8 @@ for the full dev guide; this file is the short version for AI tooling.
     cargo test --workspace
 
 CI runs these on Ubuntu, Windows, and macOS — match all four locally
-before opening a PR.
+before opening a PR. The Cloudflare Worker under `workers/catproxy` has
+its own gate: `npm test` there (plain `node --test`, no network).
 
 ## When you finish a task
 

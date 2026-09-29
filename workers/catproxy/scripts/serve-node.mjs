@@ -50,7 +50,8 @@ http.createServer(async (req, res) => {
     duplex: 'half',
   });
   try {
-    const out = await worker.fetch(request, env);
+    const ctx = { waitUntil(p) { Promise.resolve(p).catch(() => {}); } };
+    const out = await worker.fetch(request, env, ctx);
     res.writeHead(out.status, Object.fromEntries(out.headers));
     if (out.body) for await (const chunk of out.body) res.write(chunk);
     res.end();
