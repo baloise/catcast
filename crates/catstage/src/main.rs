@@ -68,11 +68,11 @@ fn is_bundled_about_url(url: &tauri::Url) -> bool {
     }
     #[cfg(target_os = "windows")]
     {
-        return url.scheme() == "http" && url.domain() == Some("tauri.localhost");
+        url.scheme() == "http" && url.domain() == Some("tauri.localhost")
     }
     #[cfg(not(target_os = "windows"))]
     {
-        return url.scheme() == "tauri";
+        url.scheme() == "tauri"
     }
 }
 
