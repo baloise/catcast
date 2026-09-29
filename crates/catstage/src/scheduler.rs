@@ -4,7 +4,11 @@
 //!
 //! - round-robin rotation through `Plan::rotation`,
 //! - cron-driven "fixed" entries (when the cron expression hits, swap to the
-//!   entry's URL for its duration, then resume the round-robin),
+//!   entry's URL for its duration, then resume the round-robin). Ticks are
+//!   edge-triggered, so on start and on every plan rebuild the scheduler
+//!   also replays any timed entry whose window is still open — a stage
+//!   restarted or reconfigured at 11:20 still shows the 11:00–12:00 lunch
+//!   menu for the remaining 40 minutes (see [`catch_up`]),
 //! - one-shot timed navigation (`NavTimed`) that overrides rotation+cron
 //!   until its timer elapses, after which the previous rotation step
 //!   continues.
@@ -142,6 +146,15 @@ async fn run(
     let mut slot_duration = current_slot_duration(&rt);
 
     announce_current(&rt, &events);
+    for action in catch_up(&rt.plan.cron, &logic, Local::now()) {
+        apply_nav_action(
+            &mut rt,
+            action,
+            &events,
+            &mut slot_started,
+            &mut slot_duration,
+        );
+    }
 
     loop {
         // Compute the next wake instant: min(slot end, one_shot end, cron tick).
@@ -173,7 +186,11 @@ async fn run(
                         slot_started = Instant::now();
                         slot_duration = current_slot_duration(&rt);
                         announce_current(&rt, &events);
-                        for action in one_shots {
+                        // Re-open any fixed window we're already inside of,
+                        // then let the script's own top-level nav (if any)
+                        // have the last word.
+                        let replay = catch_up(&rt.plan.cron, &logic, rt.cron_checked);
+                        for action in replay.into_iter().chain(one_shots) {
                             apply_nav_action(&mut rt, action, &events, &mut slot_started, &mut slot_duration);
                         }
                     }
@@ -388,6 +405,69 @@ fn fire_cron(
     out
 }
 
+/// Most recent occurrence of `job` at or before `now`.
+fn last_cron_fire(job: &CronJob, now: DateTime<Local>) -> Option<DateTime<Local>> {
+    // `after(..).next_back()` yields the occurrence strictly before its
+    // argument; nudge by a second so an occurrence exactly at `now` counts.
+    parse_cron(&job.cron)
+        .ok()?
+        .after(&(now + chrono::Duration::seconds(1)))
+        .next_back()
+}
+
+/// Timed navigations from cron jobs whose window is still open at `now`,
+/// shortened to the time that remains.
+///
+/// The tick loop only fires a job at the instant its cron expression hits.
+/// A stage that starts, or gets a new config, *after* that instant would
+/// otherwise miss the entry until its next occurrence — for a Mon–Fri lunch
+/// menu that means "tomorrow". So on start and rebuild we look at each job's
+/// most recent occurrence, dry-run its callback, and replay every
+/// `nav(url, secs)` whose `[fire, fire + secs)` window contains `now`.
+///
+/// Only timed navs are replayed. A plain `nav`, `pause` or `play` from a
+/// missed tick has no duration to bound it, so replaying it hours later
+/// would be a guess; those stay strictly tick-driven.
+fn catch_up(
+    jobs: &[CronJob],
+    logic: &Option<Arc<Mutex<Option<LogicHandle>>>>,
+    now: DateTime<Local>,
+) -> Vec<crate::logic::NavAction> {
+    use crate::logic::NavAction;
+    let Some(handle_arc) = logic else {
+        return Vec::new();
+    };
+    let guard = handle_arc.lock().expect("logic mutex poisoned");
+    let Some(handle) = guard.as_ref() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for job in jobs {
+        let Some(fired) = last_cron_fire(job, now) else {
+            continue;
+        };
+        let elapsed = (now - fired).num_seconds().max(0) as u64;
+        let actions = match handle.fire(&job.callback) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("catstage: cron job {:?} failed: {e:#}", job.cron);
+                continue;
+            }
+        };
+        for action in actions {
+            if let NavAction::NavTimed { url, secs } = action {
+                if elapsed < secs {
+                    out.push(NavAction::NavTimed {
+                        url,
+                        secs: secs - elapsed,
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -594,5 +674,88 @@ mod tests {
             next_cron_fire(&jobs, sat(12, 0, 0, 0)),
             Some(local(2026, 9, 28, 11, 0, 0, 0))
         );
+    }
+
+    #[test]
+    fn last_cron_fire_finds_most_recent_occurrence() {
+        let j = job("0 11 * * MON-FRI");
+        let tue = |h, min| local(2026, 9, 29, h, min, 0, 0);
+        // Mid-window and exactly on the tick both resolve to today's 11:00.
+        assert_eq!(last_cron_fire(&j, tue(11, 43)), Some(tue(11, 0)));
+        assert_eq!(last_cron_fire(&j, tue(11, 0)), Some(tue(11, 0)));
+        // Before today's tick: yesterday's.
+        assert_eq!(
+            last_cron_fire(&j, tue(10, 59)),
+            Some(local(2026, 9, 28, 11, 0, 0, 0))
+        );
+        // Saturday: Friday's.
+        assert_eq!(
+            last_cron_fire(&j, local(2026, 10, 3, 11, 30, 0, 0)),
+            Some(local(2026, 10, 2, 11, 0, 0, 0))
+        );
+    }
+
+    /// Plan + logic handle from the shipped default.rhai and a lunch-menu
+    /// config, as the binary would build them.
+    fn lunch_plan() -> (Plan, Option<Arc<Mutex<Option<LogicHandle>>>>) {
+        let cfg = catcast_core::Config::from_yaml(
+            r#"
+version: 1
+rotation:
+  default_duration: 30s
+  urls:
+    - https://a/
+fixed:
+  - cron: "0 11 * * MON-FRI"
+    url: https://menu/
+    duration: 60m
+"#,
+        )
+        .unwrap();
+        let src = include_str!("../../../default-logic/default.rhai");
+        let (plan, handle) = crate::logic::evaluate(src, &cfg).unwrap();
+        (plan, Some(Arc::new(Mutex::new(Some(handle)))))
+    }
+
+    #[test]
+    fn catch_up_replays_open_window_with_remaining_time() {
+        use crate::logic::NavAction;
+        let (plan, logic) = lunch_plan();
+        let tue = |h, min| local(2026, 9, 29, h, min, 0, 0);
+
+        // Restart at 11:43 → menu for the remaining 17 minutes.
+        match catch_up(&plan.cron, &logic, tue(11, 43)).as_slice() {
+            [NavAction::NavTimed { url, secs }] => {
+                assert_eq!(url, "https://menu/");
+                assert_eq!(*secs, 17 * 60);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        // Exactly on the tick → full hour.
+        match catch_up(&plan.cron, &logic, tue(11, 0)).as_slice() {
+            [NavAction::NavTimed { secs, .. }] => assert_eq!(*secs, 3600),
+            other => panic!("unexpected: {other:?}"),
+        }
+        // Window closed, before the next one, weekend: nothing to replay.
+        assert!(catch_up(&plan.cron, &logic, tue(12, 0)).is_empty());
+        assert!(catch_up(&plan.cron, &logic, tue(10, 59)).is_empty());
+        assert!(catch_up(&plan.cron, &logic, local(2026, 10, 3, 11, 30, 0, 0)).is_empty());
+        // No logic handle → nothing to fire.
+        assert!(catch_up(&plan.cron, &None, tue(11, 43)).is_empty());
+    }
+
+    #[test]
+    fn catch_up_ignores_untimed_actions() {
+        let cfg = catcast_core::Config::from_yaml(
+            "version: 1\nrotation:\n  default_duration: 30s\n  urls:\n    - https://a/\n",
+        )
+        .unwrap();
+        let src = r#"
+            fn hold() { nav("https://hold/"); pause(); }
+            fn run(cfg) { schedule("0 9 * * *", "hold"); }
+        "#;
+        let (plan, handle) = crate::logic::evaluate(src, &cfg).unwrap();
+        let logic = Some(Arc::new(Mutex::new(Some(handle))));
+        assert!(catch_up(&plan.cron, &logic, local(2026, 9, 29, 9, 30, 0, 0)).is_empty());
     }
 }

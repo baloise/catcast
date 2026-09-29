@@ -12,7 +12,9 @@ rotation:
 
 # Fixed-time entries override the rotation while they are active. The cron
 # expression is standard 5-field: `min hour day-of-month month day-of-week`,
-# evaluated in the stage machine's local time zone.
+# evaluated in the stage machine's local time zone. A stage that starts or
+# receives a new config in the middle of a window picks it up for the time
+# that remains.
 # Optional 6-field (with leading second) and 7-field (with trailing year) are
 # also accepted.
 fixed:
