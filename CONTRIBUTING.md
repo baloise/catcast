@@ -183,7 +183,7 @@ certificate store. Set `update_url = ""` to switch it off entirely.
 hash into the encrypted command, and tells the stage where to download.
 With `update_proxy = "https://<your-catproxy>"` in `catc.toml` the stage
 fetches `<proxy>/b64/<asset url>` as base64 text (the worker's
-`ALLOW_HOSTS` must include `github.com,objects.githubusercontent.com`);
+`ALLOW_HOSTS` must include `github.com,*.githubusercontent.com`);
 without it, the raw asset URL. The stage keeps the replaced binary as
 `catstage.exe.old` until its next start, so a bad update is one rename
 away from undone.
