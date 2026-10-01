@@ -115,12 +115,9 @@ fn build_escape_script(about_url: &str) -> String {
 #[command(name = "catstage", version, about = "CatCast fullscreen viewer")]
 struct Args {
     /// WebSocket URL of the CatSocks broker, e.g. wss://.../r/<room>.
-    /// Required unless `--offline` or `--url` is given.
-    #[arg(
-        long,
-        required_unless_present_any = ["offline", "url"],
-        conflicts_with_all = ["offline", "url"],
-    )]
+    /// Remembered in the config dir (`socks.url`), so later starts without
+    /// `--offline` / `--url` can omit it; passing it again replaces it.
+    #[arg(long, conflicts_with_all = ["offline", "url"])]
     socks: Option<String>,
 
     /// Run from on-disk config.yaml + logic.rhai without connecting to a
@@ -153,6 +150,37 @@ struct Args {
     /// can also be inspected when needed.
     #[arg(long)]
     devtools: bool,
+}
+
+/// `--socks` wins and is remembered for the next start; without it, the
+/// remembered URL. Only consulted for online starts, so `--offline` / `--url`
+/// never read or touch the file.
+fn resolve_socks(args: &Args) -> Option<String> {
+    if args.offline || args.url.is_some() {
+        return None;
+    }
+    if let Some(url) = &args.socks {
+        if persist::load_socks().ok().flatten().as_deref() != Some(url.as_str()) {
+            if let Err(e) = persist::save_socks(url) {
+                eprintln!("catstage: could not remember --socks: {e:#}");
+            }
+        }
+        return Some(url.clone());
+    }
+    persist::load_socks().unwrap_or_else(|e| {
+        eprintln!("catstage: could not read the remembered --socks: {e:#}");
+        None
+    })
+}
+
+fn no_socks_error() -> anyhow::Error {
+    let path = persist::socks_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "socks.url".into());
+    anyhow::anyhow!(
+        "no broker URL: pass --socks wss://…/r/<room> once (remembered in {path}), \
+         or run with --offline / --url"
+    )
 }
 
 /// Run-mode dispatch derived from `Args`. Online is the historical default;
@@ -215,17 +243,16 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let name = args.name.clone().unwrap_or_else(default_name);
     let screen = args.screen;
+    let socks = resolve_socks(&args);
 
     if args.install_autostart {
         // Autostart shortcut bakes a `--socks` URL into the .lnk command line;
-        // it has no offline analogue today. Clap already requires `--socks`
-        // unless `--offline`/`--url` is set, so reject the unsupported combo
+        // it has no offline analogue today, so reject the unsupported combo
         // here rather than producing a broken shortcut.
-        let socks = args.socks.clone().ok_or_else(|| {
-            anyhow::anyhow!(
-                "--install-autostart requires --socks (offline autostart not supported)"
-            )
-        })?;
+        if args.offline || args.url.is_some() {
+            anyhow::bail!("--install-autostart needs a broker (offline autostart not supported)");
+        }
+        let socks = socks.ok_or_else(no_socks_error)?;
         if let Some(path) = autostart::install(&autostart::AutostartArgs {
             socks,
             name: args.name.clone(),
@@ -236,12 +263,14 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let run_mode = match (args.offline, args.url.clone(), args.socks.clone()) {
+    let run_mode = match (args.offline, args.url.clone(), socks) {
         (true, _, _) => RunMode::Offline,
         (false, Some(url), _) => RunMode::SingleUrl { url },
         (false, None, Some(socks)) => RunMode::Online { socks },
-        // clap's `required_unless_present_any` guarantees we never reach this.
-        (false, None, None) => unreachable!("clap should have required --socks"),
+        (false, None, None) => {
+            eprintln!("catstage: {}", no_socks_error());
+            std::process::exit(2);
+        }
     };
 
     // Pre-flight checks happen *before* `tauri::Builder` so a fatal config

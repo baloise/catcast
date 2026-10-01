@@ -6,6 +6,7 @@
 //! - `config.yaml`   — current `Config` YAML source (as received).
 //! - `logic.rhai`    — current Rhai logic source.
 //! - `state.json`    — last persisted [`State`] snapshot.
+//! - `socks.url`     — last `--socks` broker URL, used when started without one.
 //!
 //! Persist writes are synchronous and best-effort: failures are surfaced as
 //! `anyhow::Error` and the caller decides whether to log+continue.
@@ -34,6 +35,9 @@ pub fn logic_path() -> Result<PathBuf> {
 pub fn state_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("state.json"))
 }
+pub fn socks_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("socks.url"))
+}
 
 fn read_if_exists(p: &Path) -> Result<Option<String>> {
     if p.exists() {
@@ -51,6 +55,13 @@ pub fn load_config_yaml() -> Result<Option<String>> {
 
 pub fn load_logic_rhai() -> Result<Option<String>> {
     read_if_exists(&logic_path()?)
+}
+
+/// The remembered broker URL; `None` when never saved or the file is blank.
+pub fn load_socks() -> Result<Option<String>> {
+    Ok(read_if_exists(&socks_path()?)?
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty()))
 }
 
 pub fn load_state() -> Result<Option<State>> {
@@ -117,6 +128,10 @@ pub fn save_config_yaml(yaml: &str) -> Result<()> {
 
 pub fn save_logic_rhai(rhai: &str) -> Result<()> {
     write_atomic(&logic_path()?, rhai)
+}
+
+pub fn save_socks(url: &str) -> Result<()> {
+    write_atomic(&socks_path()?, &format!("{url}\n"))
 }
 
 pub fn save_state(state: &State) -> Result<()> {

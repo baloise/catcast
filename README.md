@@ -39,6 +39,7 @@ cd crates/catsocks && wrangler deploy
 # 2. On each stage machine
 catstage.exe --install-autostart --socks wss://.../r/<room> --name kitchen --screen 2
 # Optional: --screen is 1-based. If unavailable, catstage falls back to primary monitor.
+# --socks is remembered: later starts can be plain `catstage.exe`.
 
 # 3. On your laptop
 catc init --socks wss://.../r/<room>

@@ -97,6 +97,10 @@ cargo run -p catstage -- --socks ws://127.0.0.1:8787/r/dev --name kitchen --scre
 If the selected monitor is unavailable, catstage falls back to the primary
 monitor.
 
+`--socks` is remembered in `socks.url` in the stage's config dir, so the
+next start can omit it (passing it again replaces the remembered URL).
+`--offline` and `--url` neither read nor change it.
+
 Tauri opens a fullscreen window pointed at `catcast://about` — a
 **read-only** info page showing the stage's name, version, connection
 state, on-disk files, and autostart status. There are no buttons. Every
@@ -172,7 +176,7 @@ cargo run -p catc -- init --socks ws://127.0.0.1:8787/r/dev
 ```
 
 To wipe an existing dev state on the stage side, delete
-`~/.config/catcast/{config.yaml,logic.rhai,state.json}`.
+`~/.config/catcast/{config.yaml,logic.rhai,state.json,socks.url}`.
 
 The "latest release" lookup follows the `/releases/latest` redirect of
 `update_url` in `catc.toml` (default: this repository on GitHub; no API
