@@ -7,6 +7,7 @@
 
 mod cfg;
 mod cli;
+mod default_logic;
 mod net;
 mod release;
 

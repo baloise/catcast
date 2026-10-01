@@ -1,4 +1,5 @@
 use crate::cfg::{Aliases, CatcConfig, Stage};
+use crate::default_logic::{self, LogicStatus, DEFAULT_LOGIC};
 use crate::net::{keys_for, Broker};
 use crate::release;
 use anyhow::{anyhow, bail, Context, Result};
@@ -296,7 +297,6 @@ pub async fn run(cli: Cli) -> Result<()> {
         },
         Cmd::Logic { sub } => match sub {
             LogicCmd::Import { file, targets } => {
-                const DEFAULT_LOGIC: &str = include_str!("../../../default-logic/default.rhai");
                 let rhai = match file {
                     Some(path) => {
                         fs::read_to_string(&path).with_context(|| format!("read {path}"))?
@@ -724,7 +724,16 @@ async fn cmd_stage_update(o: UpdateOpts) -> Result<()> {
             }
         }
     }
+    // Stages already on the target that are not being reinstalled.
+    let target_str = target.to_string();
+    let mut on_target: Vec<String> = names
+        .iter()
+        .filter(|n| states.get(*n).is_some_and(|s| s.version == target_str))
+        .filter(|n| !selected.iter().any(|(s, _)| s == *n))
+        .cloned()
+        .collect();
     if selected.is_empty() {
+        hint_stale_logic(&mut br, &keys, &on_target).await?;
         br.close().await;
         bail!("nothing to update");
     }
@@ -791,7 +800,6 @@ async fn cmd_stage_update(o: UpdateOpts) -> Result<()> {
     }
 
     let started = std::time::Instant::now();
-    let target_str = target.to_string();
     // Takes `phase` explicitly so the completion checks below can read it
     // between calls.
     let handle = |phase: &mut HashMap<String, Phase>, name: &str, pt: catcast_proto::Plaintext| {
@@ -875,6 +883,14 @@ async fn cmd_stage_update(o: UpdateOpts) -> Result<()> {
             }
         }
     }
+    on_target.extend(
+        selected
+            .iter()
+            .map(|(n, _)| n)
+            .filter(|n| phase[*n] == Phase::BackUp)
+            .cloned(),
+    );
+    hint_stale_logic(&mut br, &keys, &on_target).await?;
     br.close().await;
 
     let mut all_ok = true;
@@ -893,6 +909,48 @@ async fn cmd_stage_update(o: UpdateOpts) -> Result<()> {
     }
     if !all_ok {
         bail!("one or more stages were not updated");
+    }
+    Ok(())
+}
+
+/// Point out stages whose logic is a verbatim default from an older release
+/// (or missing). Custom logic is neither reported nor touched: refreshing it
+/// is the operator's call, so this only prints the command to run.
+async fn hint_stale_logic(
+    br: &mut Broker,
+    keys: &HashMap<String, catcast_proto::Key>,
+    names: &[String],
+) -> Result<()> {
+    if names.is_empty() {
+        return Ok(());
+    }
+    for n in names {
+        br.send(
+            keys.get(n).expect("key just derived"),
+            n,
+            &Message::GetLogic,
+        )
+        .await?;
+    }
+    let mut logic: HashMap<String, Option<String>> = HashMap::new();
+    br.collect_until(keys, Duration::from_secs(2), |name, pt| {
+        if let Message::LogicData { rhai } = pt.msg {
+            logic.insert(name.to_owned(), rhai);
+        }
+        names.iter().all(|n| logic.contains_key(n))
+    })
+    .await;
+    for n in names {
+        match logic.get(n).map(|r| default_logic::classify(r.as_deref())) {
+            Some(LogicStatus::OutdatedDefault(releases)) => println!(
+                "{n}: logic is the default shipped with {releases}; \
+                 refresh it with `catc logic import --name {n}`"
+            ),
+            Some(LogicStatus::Missing) => println!(
+                "{n}: no logic loaded; push the default with `catc logic import --name {n}`"
+            ),
+            _ => {}
+        }
     }
     Ok(())
 }

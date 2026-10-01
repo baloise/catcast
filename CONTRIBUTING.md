@@ -188,6 +188,15 @@ without it, the raw asset URL. The stage keeps the replaced binary as
 `catstage.exe.old` until its next start, so a bad update is one rename
 away from undone.
 
+A binary update never rewrites a stage's `logic.rhai`, since it may be
+custom. Afterwards `catc stage update` reads each stage's logic back and,
+if it is a verbatim copy of a default from an older release (or missing),
+prints the `catc logic import --name <stage>` that refreshes it. Anything
+else counts as custom and is left alone. Recognition is by hash
+(`crates/catc/src/default_logic.rs`); when you edit
+`default-logic/default.rhai`, a pinned-hash test fails until you move the
+old hash into `PREVIOUS`.
+
 To exercise the whole path locally without a release, serve a rebuilt
 binary yourself and pin its hash:
 
