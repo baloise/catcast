@@ -76,9 +76,15 @@ mod tests {
         assert!(PREVIOUS.iter().all(|(h, _)| *h != CURRENT_SHA256));
     }
 
+    /// `include_str!` sees CRLF on a Windows checkout with autocrlf, so the
+    /// tests normalise before building their variants.
+    fn default_lf() -> String {
+        DEFAULT_LOGIC.replace("\r\n", "\n")
+    }
+
     #[test]
     fn classify_ignores_line_endings_and_trailing_space() {
-        let crlf = DEFAULT_LOGIC.replace('\n', "\r\n") + "\r\n\r\n";
+        let crlf = default_lf().replace('\n', "\r\n") + "\r\n\r\n";
         assert_eq!(classify(Some(&crlf)), LogicStatus::Current);
     }
 
@@ -92,7 +98,7 @@ mod tests {
     #[test]
     fn classify_recognises_the_v0_1_0_default() {
         // The one line that changed in 4ad5dfb.
-        let old = DEFAULT_LOGIC.replace(
+        let old = default_lf().replace(
             "    unit.trim(); // trims in place; returns ()\n    switch unit {",
             "    switch unit.trim() {",
         );
