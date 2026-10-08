@@ -58,6 +58,10 @@ pub struct TauriCtx {
     /// task is spawned and the about page should make the operator aware.
     pub offline: bool,
     pub sched_tx: mpsc::Sender<scheduler::Cmd>,
+    /// Outbound broker channel (shared with `SchedEvents`); `None` until the
+    /// socks task is up and always in offline modes. Lets page-load events
+    /// in `main.rs` broadcast `State` when `actual_url` changes.
+    pub out: Arc<Mutex<Option<mpsc::Sender<catcast_proto::Message>>>>,
     pub stage_name: String,
     pub screen: Option<u32>,
     /// Socks link status for the about-page broker indicator.

@@ -33,6 +33,12 @@ pub struct State {
     #[serde(default)]
     pub platform: String,
     pub current_url: Option<String>,
+    /// Where the webview actually is: the URL of the last finished top-level
+    /// load. Differs from `current_url` while a corporate proxy or SSO
+    /// redirect holds the kiosk elsewhere (see [`State::stuck`]). Live data:
+    /// additive like `platform`, never meaningful from disk.
+    #[serde(default)]
+    pub actual_url: Option<String>,
     pub mode: Mode,
     pub has_logic: bool,
     pub has_config: bool,
@@ -41,6 +47,14 @@ pub struct State {
 }
 
 impl State {
+    /// True when the webview sits on a different host than the one the
+    /// scheduler sent it to, and that host is not the bundled about page.
+    /// A proxy login (`gateway.zscaler.net`, `login.microsoftonline.com`,
+    /// ...) that never returns to the content URL looks exactly like this.
+    pub fn stuck(&self) -> bool {
+        stuck(self.current_url.as_deref(), self.actual_url.as_deref())
+    }
+
     pub fn fresh(name: impl Into<String>, version: impl Into<String>) -> Self {
         Self {
             schema: CURRENT_STATE_SCHEMA,
@@ -48,11 +62,47 @@ impl State {
             version: version.into(),
             platform: platform_tag(),
             current_url: None,
+            actual_url: None,
             mode: Mode::Playing,
             has_logic: false,
             has_config: false,
             since: chrono::Utc::now().timestamp_millis(),
         }
+    }
+}
+
+/// The catstage about page, as the webview reports it: `tauri://localhost`
+/// on Linux/macOS, `http://tauri.localhost` on Windows.
+pub fn is_about_url(url: &str) -> bool {
+    match url::Url::parse(url) {
+        Ok(u) => {
+            (u.scheme() == "tauri" && u.host_str() == Some("localhost"))
+                || (u.scheme() == "http" && u.host_str() == Some("tauri.localhost"))
+        }
+        Err(_) => false,
+    }
+}
+
+/// Host of `url`, lowercased; `None` for unparsable or host-less URLs.
+pub fn url_host(url: &str) -> Option<String> {
+    url::Url::parse(url)
+        .ok()?
+        .host_str()
+        .map(|h| h.to_ascii_lowercase())
+}
+
+/// See [`State::stuck`]. Both URLs known, hosts differ, actual is not the
+/// about page.
+pub fn stuck(intended: Option<&str>, actual: Option<&str>) -> bool {
+    let (Some(intended), Some(actual)) = (intended, actual) else {
+        return false;
+    };
+    if is_about_url(actual) {
+        return false;
+    }
+    match (url_host(intended), url_host(actual)) {
+        (Some(a), Some(b)) => a != b,
+        _ => false,
     }
 }
 
@@ -92,6 +142,33 @@ mod tests {
             "mode":"playing","has_logic":false,"has_config":false,"since":0}"#;
         let s: State = serde_json::from_str(json).unwrap();
         assert_eq!(s.platform, "");
+        assert_eq!(s.actual_url, None);
         assert_eq!(s.version, "0.1.1");
+    }
+
+    #[test]
+    fn stuck_rule() {
+        let menu = "https://catproxy.example.workers.dev/https://pages.example.com/menu.html";
+        assert!(stuck(
+            Some(menu),
+            Some("https://login.microsoftonline.com/x/saml2/?whr=example.com")
+        ));
+        // Same host, different path: a normal page load.
+        assert!(!stuck(
+            Some(menu),
+            Some("https://catproxy.example.workers.dev/https://pages.example.com/other.html")
+        ));
+        // Host comparison is case-insensitive.
+        assert!(!stuck(
+            Some(menu),
+            Some("https://CATPROXY.example.workers.dev/")
+        ));
+        // Parked on the about page is not stuck.
+        assert!(!stuck(Some(menu), Some("http://tauri.localhost/")));
+        assert!(!stuck(Some(menu), Some("tauri://localhost/#idle")));
+        // Unknown either side: no verdict.
+        assert!(!stuck(None, Some(menu)));
+        assert!(!stuck(Some(menu), None));
+        assert!(!stuck(Some(menu), Some("about:blank")));
     }
 }

@@ -7,18 +7,7 @@
   },
   "app": {
     "withGlobalTauri": true,
-    "windows": [
-      {
-        "label": "stage",
-        "title": "CatCast",
-        "fullscreen": true,
-        "decorations": false,
-        "alwaysOnTop": true,
-        "skipTaskbar": true,
-        "resizable": false,
-        "transparent": false
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }

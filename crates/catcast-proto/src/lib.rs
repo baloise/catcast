@@ -66,6 +66,28 @@ pub enum UpdateEncoding {
     Base64,
 }
 
+/// One hop of the kiosk webview's top-level navigation history
+/// (`Message::TraceData`). `ts` is unix milliseconds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceEntry {
+    pub ts: i64,
+    pub kind: TraceKind,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceKind {
+    /// The scheduler asked the webview to go here.
+    Intended,
+    /// The webview started a top-level navigation here. Server redirects
+    /// (corporate proxy logins, SSO hops) show up as further `Started`
+    /// entries without a new `Intended`.
+    Started,
+    /// A top-level document finished loading at this URL.
+    Loaded,
+}
+
 /// What the broker sees. Opaque to it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
@@ -116,6 +138,10 @@ pub enum Message {
     /// Ask the stage to return its currently-loaded logic.rhai. Reply is a
     /// `LogicData`; no `Reply` is sent.
     GetLogic,
+    /// Ask the stage for its recent top-level navigations (intended URL,
+    /// every navigation start including redirects, finished loads). Reply
+    /// is a `TraceData`; no `Reply` is sent.
+    GetTrace,
 
     // ─── CLI -> stage: physical-machine / window actions ─────────────────
     /// Navigate the kiosk back to its bundled about page. The stage captures
@@ -185,6 +211,12 @@ pub enum Message {
     /// to the stage yet.
     LogicData {
         rhai: Option<String>,
+    },
+    /// Reply to `GetTrace`: newest entry last, bounded by the stage's ring
+    /// buffer. `State::actual_url` says where the webview is right now;
+    /// this says how it got there.
+    TraceData {
+        entries: Vec<TraceEntry>,
     },
 }
 

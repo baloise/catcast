@@ -11,6 +11,7 @@ serde = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
+url = { workspace = true }
 cron = { workspace = true }
 humantime = { workspace = true }
 

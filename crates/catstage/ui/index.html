@@ -202,6 +202,7 @@
         <div class="status-grid">
           <div class="k">Mode</div><div><span id="mode-pill" class="pill">…</span></div>
           <div class="k">Current URL</div><div><code id="current-url">—</code></div>
+          <div class="k">Actually on</div><div><code id="actual-url">—</code></div>
           <div class="k">Has config</div><div id="has-config">—</div>
           <div class="k">Has logic</div><div id="has-logic">—</div>
           <div class="k">Since</div><div id="since">—</div>
@@ -261,6 +262,14 @@
           pill.textContent = text;
 
           document.getElementById("current-url").textContent = snap.state.current_url || "—";
+          const actual = document.getElementById("actual-url");
+          // Mirrors catcast_core::state::stuck: different host, not the about page.
+          const host = (u) => { try { return new URL(u).host.toLowerCase(); } catch (_) { return null; } };
+          const isAbout = (u) => /^(tauri:\/\/localhost|http:\/\/tauri\.localhost)([/#?]|$)/i.test(u || "");
+          const a = snap.state.actual_url, c = snap.state.current_url;
+          const stuck = !!(a && c && !isAbout(a) && host(a) && host(c) && host(a) !== host(c));
+          actual.textContent = (a || "—") + (stuck ? "   ← STUCK (not on the intended host)" : "");
+          actual.style.color = stuck ? "#e5484d" : "";
           document.getElementById("has-config").textContent = snap.state.has_config ? "yes" : "no";
           document.getElementById("has-logic").textContent = snap.state.has_logic ? "yes" : "no";
           document.getElementById("since").textContent = fmtSince(snap.state.since);

@@ -4,7 +4,7 @@ use crate::net::{keys_for, Broker};
 use crate::release;
 use anyhow::{anyhow, bail, Context, Result};
 use catcast_core::Config;
-use catcast_proto::Message;
+use catcast_proto::{Message, TraceKind};
 use clap::{Args, Parser, Subcommand};
 use std::collections::HashMap;
 use std::fs;
@@ -88,6 +88,9 @@ pub enum Cmd {
     },
     /// Park the kiosk on its about page (equivalent to F1 at the screen). Stops rotation.
     About(Targets),
+    /// Show where the kiosk webview actually is and its recent navigation
+    /// hops — redirects to proxy logins / SSO included (needs exactly one target).
+    Trace(Targets),
     /// Cleanly stop the stage process.
     Shutdown(Targets),
     /// Print catc's version and the latest published release.
@@ -356,6 +359,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Cmd::About(t) => cmd_send(t, Message::NavAbout).await,
+        Cmd::Trace(t) => cmd_trace(t).await,
         Cmd::Shutdown(t) => cmd_send(t, Message::Shutdown).await,
         Cmd::Version => cmd_version().await,
     }
@@ -604,6 +608,95 @@ async fn cmd_export_one(t: Targets, kind: ExportKind, dir: Option<String>) -> Re
     Ok(())
 }
 
+/// `catc trace`: intended vs. actual URL, then the navigation ring buffer.
+/// The only command besides the exports that needs one target, because the
+/// output is a per-stage log rather than a one-line verdict.
+async fn cmd_trace(t: Targets) -> Result<()> {
+    let cfg = CatcConfig::load()?;
+    let names = resolve_targets(&cfg, &t)?;
+    if names.len() != 1 {
+        bail!("trace needs exactly one target (--name N)");
+    }
+    let name = names[0].clone();
+    let keys = keys_for(&names)?;
+    let key = keys.get(&name).expect("key just derived");
+
+    let mut br = Broker::connect(&cfg.socks).await?;
+    br.send(key, &name, &Message::GetState).await?;
+    br.send(key, &name, &Message::GetTrace).await?;
+    let plaintexts = br.collect(&keys, Duration::from_secs(2)).await;
+    br.close().await;
+
+    let mut state: Option<catcast_core::State> = None;
+    let mut entries: Option<Vec<catcast_proto::TraceEntry>> = None;
+    for (_n, pt) in plaintexts {
+        match pt.msg {
+            Message::State(s) => state = Some(s),
+            Message::TraceData { entries: e } => entries = Some(e),
+            _ => {}
+        }
+    }
+    let state = state.ok_or_else(|| anyhow!("{name}: no reply within 2s (stage offline?)"))?;
+    let entries = entries.ok_or_else(|| {
+        anyhow!("{name}: state arrived but no trace — stage older than v0.3 (update it)")
+    })?;
+
+    println!("intended  {}", state.current_url.as_deref().unwrap_or("—"));
+    println!(
+        "actual    {}{}",
+        state.actual_url.as_deref().unwrap_or("—"),
+        if state.stuck() {
+            "   <- STUCK (not on the intended host)"
+        } else {
+            ""
+        }
+    );
+    println!("since     {}", fmt_ts(state.since));
+    println!();
+    if entries.is_empty() {
+        println!("(no navigations recorded yet)");
+    }
+    for e in &entries {
+        let kind = match e.kind {
+            TraceKind::Intended => "intended",
+            TraceKind::Started => "started ",
+            TraceKind::Loaded => "loaded  ",
+        };
+        println!("{}  {kind}  {}", fmt_ts(e.ts), e.url);
+    }
+    Ok(())
+}
+
+/// Unix-ms as local wall-clock time; the date only when it isn't today.
+fn fmt_ts(ms: i64) -> String {
+    use chrono::{DateTime, Local, Utc};
+    match DateTime::<Utc>::from_timestamp_millis(ms) {
+        Some(dt) => {
+            let local = dt.with_timezone(&Local);
+            if local.date_naive() == Local::now().date_naive() {
+                local.format("%H:%M:%S").to_string()
+            } else {
+                local.format("%Y-%m-%d %H:%M:%S").to_string()
+            }
+        }
+        None => ms.to_string(),
+    }
+}
+
+/// Last column of `stage list --probe`: the host the webview is actually
+/// on, flagged when it is not the intended one.
+fn where_column(st: &catcast_core::State) -> String {
+    match st
+        .actual_url
+        .as_deref()
+        .and_then(catcast_core::state::url_host)
+    {
+        None => String::new(),
+        Some(h) if st.stuck() => format!("STUCK on {h}"),
+        Some(h) => format!("on {h}"),
+    }
+}
+
 async fn cmd_targets_list(probe: bool) -> Result<()> {
     let cfg = CatcConfig::load()?;
     if cfg.stages.is_empty() {
@@ -662,8 +755,10 @@ async fn cmd_targets_list(probe: bool) -> Result<()> {
                     _ => String::new(),
                 };
                 println!(
-                    "up  \t{act}\t{}\tv{}\t{platform}\t{status}",
-                    s.name, st.version
+                    "up  \t{act}\t{}\tv{}\t{platform}\t{status}\t{}",
+                    s.name,
+                    st.version,
+                    where_column(st)
                 );
             }
         }

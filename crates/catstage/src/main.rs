@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use catcast_core::{Config, State};
-use catcast_proto::{Key, Message};
+use catcast_proto::{Key, Message, TraceKind};
 use clap::Parser;
 use tauri::Manager;
 
@@ -25,12 +25,30 @@ mod logic;
 mod persist;
 mod scheduler;
 mod socks;
+mod trace;
 mod update;
 
 use crate::about::TauriCtx;
 use crate::logic::{LogicHandle, Plan};
 
 const WINDOW_LABEL: &str = "stage";
+
+/// The kiosk window. Built in `setup` rather than declared in
+/// `tauri.conf.json` so a navigation hook can be attached (config windows
+/// are created before `setup` runs and the hook is builder-only).
+fn stage_window_config() -> tauri::utils::config::WindowConfig {
+    tauri::utils::config::WindowConfig {
+        label: WINDOW_LABEL.into(),
+        title: "CatCast".into(),
+        fullscreen: true,
+        decorations: false,
+        always_on_top: true,
+        skip_taskbar: true,
+        resizable: false,
+        transparent: false,
+        ..Default::default()
+    }
+}
 
 #[cfg(target_os = "windows")]
 fn attach_parent_console_if_any() {
@@ -327,6 +345,10 @@ fn main() -> Result<()> {
                     .map(|s| s.get().to_string())
                     .unwrap_or_else(|| bundled_about_fallback().to_string());
                 let _ = webview.eval(build_escape_script(&about_url));
+                if let Ok(url) = webview.url() {
+                    trace::record(app, TraceKind::Loaded, url.as_str());
+                    note_actual_url(app, url.as_str());
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -340,6 +362,17 @@ fn main() -> Result<()> {
             // Seed with a deterministic about URL so startup never records
             // `about:blank` as the canonical return target.
             app.manage(about::AboutUrl::new(bundled_about_fallback()));
+            app.manage(trace::NavTrace::new());
+
+            // Every top-level navigation start, redirects included, goes
+            // into the trace. Never cancels anything.
+            let nav_app = app.handle().clone();
+            let window = tauri::WebviewWindowBuilder::from_config(app, &stage_window_config())?
+                .on_navigation(move |url| {
+                    trace::record(&nav_app, TraceKind::Started, url.as_str());
+                    true
+                })
+                .build()?;
 
             // Force fullscreen at runtime in addition to the config-time
             // request. WSLg / Wayland in particular tend to ignore the
@@ -348,7 +381,7 @@ fn main() -> Result<()> {
             //
             // If setup-time URL probing already sees the bundled about page,
             // store it. Ignore `about:blank` and non-bundled URLs.
-            if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
+            {
                 if let Some(screen_num) = screen {
                     position_window_on_screen(&window, screen_num);
                 }
@@ -390,6 +423,7 @@ fn main() -> Result<()> {
                 broker_url: setup_run_mode.broker_url_display(),
                 offline: setup_run_mode.is_offline(),
                 sched_tx: sched_tx.clone(),
+                out: Arc::clone(&out_tx),
                 stage_name: stage_name.clone(),
                 screen,
                 connection: std::sync::Arc::new(AtomicU8::new(
@@ -461,6 +495,7 @@ async fn bootstrap(
                 sh.state.name = name.clone();
                 sh.state.version = env!("CARGO_PKG_VERSION").to_string();
                 sh.state.platform = catcast_core::platform_tag();
+                sh.state.actual_url = None; // live data; the first page load sets it
                 sh.config_yaml = config_yaml.clone();
                 sh.logic_rhai = logic_rhai.clone();
             }
@@ -672,6 +707,7 @@ impl scheduler::Events for SchedEvents {
                 eprintln!("catstage: state save failed: {e:#}");
             }
         }
+        trace::record(&self.app, TraceKind::Intended, url);
         steer_webview(&self.app, url);
         about::emit_state(&self.app, WINDOW_LABEL);
     }
@@ -708,6 +744,25 @@ fn navigate_to_about(app: &tauri::AppHandle) {
     if let Err(e) = window.navigate(target) {
         eprintln!("catstage: navigate(about) failed: {e}");
     }
+}
+
+/// A top-level document finished loading at `url`: remember it as
+/// `State::actual_url` and, when it changed, tell the CLI and the about
+/// page. Not persisted — a fresh process starts with `None`.
+fn note_actual_url(app: &tauri::AppHandle, url: &str) {
+    let Some(ctx) = app.try_state::<TauriCtx>() else {
+        return;
+    };
+    let snap = {
+        let mut sh = ctx.shared.lock().unwrap();
+        if sh.state.actual_url.as_deref() == Some(url) {
+            return;
+        }
+        sh.state.actual_url = Some(url.to_string());
+        sh.state.clone()
+    };
+    broadcast(&ctx.out, Message::State(snap));
+    about::emit_state(app, WINDOW_LABEL);
 }
 
 /// Drive the kiosk webview to `url`.
@@ -788,6 +843,14 @@ async fn dispatch(
         Message::GetLogic => {
             let rhai = shared.lock().unwrap().logic_rhai.clone();
             broadcast(&out, Message::LogicData { rhai });
+            None
+        }
+        Message::GetTrace => {
+            let entries = app
+                .try_state::<trace::NavTrace>()
+                .map(|t| t.snapshot())
+                .unwrap_or_default();
+            broadcast(&out, Message::TraceData { entries });
             None
         }
         Message::NavAbout => {
@@ -943,7 +1006,8 @@ async fn dispatch(
         Message::State(_)
         | Message::Reply { .. }
         | Message::ConfigData { .. }
-        | Message::LogicData { .. } => None,
+        | Message::LogicData { .. }
+        | Message::TraceData { .. } => None,
     };
 
     if let Some(res) = outcome {
