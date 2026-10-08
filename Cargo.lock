@@ -447,6 +447,7 @@ dependencies = [
  "catcast-core",
  "catcast-net",
  "catcast-proto",
+ "chrono",
  "clap",
  "directories",
  "futures-util",
@@ -474,6 +475,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "thiserror 2.0.18",
+ "url",
 ]
 
 [[package]]
@@ -5740,8 +5742,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 [[package]]
 name = "wry"
 version = "0.55.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "186f9871daa55fd9c016578b810d149de58367113db7fb72b462d2323ce19514"
+source = "git+https://github.com/baloise/wry?rev=84e65d99fae30a0f4e2ea9ed3916e7d40d5ab8ee#84e65d99fae30a0f4e2ea9ed3916e7d40d5ab8ee"
 dependencies = [
  "base64 0.22.1",
  "block2",

@@ -64,6 +64,13 @@ toml = "0.9"
 directories = "6"
 humantime = "2"
 
+# catstage: WebView2 signs in to Entra ID silently with the Windows account
+# (AllowSingleSignOnUsingOSPrimaryAccount). wry has no builder option for
+# that environment flag, so a one-commit fork sets it; see CONTRIBUTING.md
+# "Why wry is patched". Drop once upstream exposes it.
+[patch.crates-io]
+wry = { git = "https://github.com/baloise/wry", rev = "84e65d99fae30a0f4e2ea9ed3916e7d40d5ab8ee" }
+
 [workspace.metadata.release]
 shared-version             = true
 consolidate-commits        = true

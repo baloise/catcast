@@ -51,6 +51,23 @@ Roughly in order of preference:
 
 If in doubt, open an issue first.
 
+## Why wry is patched
+
+`Cargo.toml` pins `wry` to a one-commit fork
+(`baloise/wry`, branch `catcast-os-sso`). The commit sets WebView2's
+`AllowSingleSignOnUsingOSPrimaryAccount` when the environment is created,
+so a kiosk whose corporate proxy bounces it to Entra ID signs back in with
+the Windows account's Primary Refresh Token instead of showing a login
+form (see "Corporate proxy re-authentication" in
+[workers/catproxy/README.md](workers/catproxy/README.md)). wry has no
+builder option for that flag; the patch defaults it on and honours
+`WRY_WEBVIEW2_OS_SSO=0` as a kill switch. It touches `#[cfg(windows)]` code
+only, so Linux and macOS builds are unaffected.
+
+To bump wry: rebase the branch onto the new tag, push, and update the `rev`
+in `Cargo.toml`. Drop the patch once upstream exposes the option through
+`WebViewBuilderExtWindows` and Tauri forwards it.
+
 ## Local development
 
 CatCast is a Rust workspace; `cargo build --workspace` from the repo root
