@@ -12,7 +12,9 @@ admin. Three pieces:
 - **catc** — the CLI. Drives one or many stages from your laptop.
 - **catproxy** — optional same-origin rewriting proxy (Cloudflare Worker) for
   pages whose sub-resources get lost behind per-domain authenticating corporate
-  proxies. See [workers/catproxy](workers/catproxy/README.md).
+  proxies. See [workers/catproxy](workers/catproxy/README.md), including
+  what to do when a kiosk lands on the corporate proxy's login page and
+  how `catc trace` shows where a stage really is.
 
 End-to-end encrypted. No accounts, no master server, no telemetry. Stage
 state survives reboots and broker outages.

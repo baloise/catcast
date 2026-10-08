@@ -87,6 +87,55 @@ wrangler deploy --var 'ALLOW_HOSTS:pages.example.com,*.cdn.example' \
                 --var 'DEFAULT_URL:https://pages.example.com/board.html'
 ```
 
+## Corporate proxy re-authentication
+
+Symptom: a kiosk that was fine for days shows a Microsoft sign-in page
+(`login.microsoftonline.com/<tenant>/saml2/?whr=<company>&sso_reload=true`)
+instead of the proxied board. Nothing in catproxy can produce that page:
+the worker fetches from Cloudflare and drops cookies both ways. The
+redirect happens on the kiosk's own network leg. Zscaler-style proxies
+authenticate the browser per destination host with a cookie; when that
+cookie expires, the next top-level navigation to `<worker>` gets a 307 to
+the proxy's gateway, which hands off to the company IdP. Edge would finish
+that silently with the Windows account; a plain WebView2 shows the form.
+
+`catc trace --name <stage>` shows the chain (`started https://gateway…`,
+`started https://login.microsoftonline.com/…`) and `catc stage list
+--probe` prints `STUCK on login.microsoftonline.com` while it lasts. The
+stage keeps re-navigating at every rotation slot, so it recovers by itself
+once the session is valid again.
+
+Two fixes, in order of permanence:
+
+1. **Exempt the worker host from proxy authentication** (one-line change
+   for the proxy admins, no kiosk involvement). In Zscaler ZIA:
+   *Administration → Authentication Settings → Authentication Exemptions →
+   Exempted URLs*, add `<worker hostname>`. Traffic to an exempted URL is
+   attributed to the location instead of a user, which is what a kiosk
+   should be anyway. Suggested request text:
+
+   > Please add `catproxy.<account>.workers.dev` to the ZIA cookie-
+   > authentication exemption list. It is a read-only signage proxy that
+   > only serves `<allowed hosts>`; the kiosks that display it have no
+   > user in front of them to complete the SAML login when the session
+   > expires.
+
+2. **Let WebView2 sign in with the Windows account.** catstage ships with
+   WebView2's `AllowSingleSignOnUsingOSPrimaryAccount` enabled (via a
+   patched wry, see CONTRIBUTING.md), so the IdP hop completes with the
+   device's Primary Refresh Token like it does in Edge. Preconditions on
+   the kiosk, checked with `dsregcmd /status`: `AzureAdJoined : YES` (or
+   hybrid) and, under *SSO State*, `AzureAdPrt : YES` for the signed-in
+   Windows user. A local or shared account has no PRT, and the flag does
+   nothing. Conditional Access rules that require interactive MFA for that
+   user also defeat it. `WRY_WEBVIEW2_OS_SSO=0` in the stage's environment
+   turns the flag off without a rebuild.
+
+Deeper inspection (network log, DOM, console) is possible in principle:
+WebView2 is Chromium and speaks the DevTools protocol on
+`--remote-debugging-port`; tunnelling that through catsocks is a planned
+follow-up, not something the stage does today.
+
 ## What it does and doesn't do
 
 - Forwards method, body and headers (minus hop-by-hop, `Cookie`, `Origin`,
