@@ -4,8 +4,14 @@ compatibility_date = "2024-12-01"
 
 # `worker-build` is invoked by `wrangler dev` / `wrangler deploy` to compile
 # the crate to WASM and emit a JS shim under `build/`.
+#
+# Pinned to the `worker` version in Cargo.lock: the two crates are released
+# in lockstep, and a newer worker-build refuses an older locked wasm-bindgen
+# ("Unsupported version wasm-bindgen@…"). An unpinned `cargo install` also
+# upgrades an already-installed copy. When `worker` is bumped, bump this too;
+# the `worker_build_matches_locked_worker` test in src/lib.rs enforces it.
 [build]
-command = "cargo install -q worker-build && worker-build --release"
+command = "cargo install -q --locked worker-build --version 0.8.3 && worker-build --release"
 
 # One Durable Object class per room.
 [[durable_objects.bindings]]

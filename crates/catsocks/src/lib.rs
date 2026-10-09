@@ -100,3 +100,36 @@ mod worker_impl {
         }
     }
 }
+
+/// `wrangler.toml` installs `worker-build` at a pinned version; it must equal
+/// the `worker` version in Cargo.lock, or the deploy fails on a wasm-bindgen
+/// mismatch. Runs on the native CI matrix, so drift fails CI instead of the
+/// deploy.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    #[test]
+    fn worker_build_matches_locked_worker() {
+        let wrangler = include_str!("../wrangler.toml");
+        let lock = include_str!("../../../Cargo.lock").replace("\r\n", "\n");
+
+        let pinned = wrangler
+            .lines()
+            .find(|l| l.trim_start().starts_with("command") && l.contains("worker-build"))
+            .and_then(|l| l.split("--version").nth(1))
+            .and_then(|rest| rest.split_whitespace().next())
+            .expect("wrangler.toml [build] command must pin worker-build with --version");
+
+        let locked = lock
+            .split("\n[[package]]\n")
+            .find(|pkg| pkg.starts_with("name = \"worker\"\n"))
+            .and_then(|pkg| pkg.lines().find_map(|l| l.strip_prefix("version = ")))
+            .map(|v| v.trim_matches('"'))
+            .expect("Cargo.lock has no `worker` package");
+
+        assert_eq!(
+            pinned, locked,
+            "wrangler.toml pins worker-build {pinned} but Cargo.lock has worker {locked}; \
+             set the --version in wrangler.toml's [build] command to {locked}"
+        );
+    }
+}
