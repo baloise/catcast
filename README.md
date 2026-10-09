@@ -26,10 +26,13 @@ may follow. The first install of a stage is a manual EXE drop; after
 that `catc stage update` pushes a release to running stages: each one
 downloads the asset (through catproxy's `/b64/` route as text, so a
 content-sniffing corporate proxy never sees an executable), verifies the
-SHA-256 published with the release, swaps the binary in beside itself,
-relaunches with its own arguments and keeps the previous binary as
-`.old` for one generation. Nothing updates on its own — there is no
-periodic check, by design. WSL/Linux is the recommended dev path.
+SHA-256 **and an Ed25519 release signature**, swaps the binary in beside
+itself, relaunches with its own arguments and keeps the previous binary
+as `.old` for one generation. For kiosks whose proxy blocks the download
+outright, `catc stage update --stream` pushes the verified binary over
+the encrypted broker instead. `catc self-update` updates the CLI the same
+way. Nothing updates on its own — there is no periodic check, by design.
+WSL/Linux is the recommended dev path.
 
 ## Quick start
 

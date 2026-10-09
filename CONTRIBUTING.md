@@ -234,6 +234,38 @@ The stage acks, downloads, swaps, relaunches; `stage list --probe` shows
 the new process, and `catstage.old` disappears from the binary's
 directory about 30 s after the restart.
 
+### Signed binaries
+
+CI signs every released binary with an Ed25519 key (the
+`CATCAST_RELEASE_KEY_PEM` secret) and attaches a hex `.sig` sidecar; the
+matching public key is compiled into `catcast-net`
+(`sign::RELEASE_PUBKEY`). catstage refuses to install an update whose
+signature does not verify, and `catc` fetches and forwards the `.sig`
+automatically (`--url` updates take `--sig`). So an operator — or anyone
+who learns a stage name — can push only the exact bytes CI built, not an
+arbitrary binary. Rotating the key means generating a new one, replacing
+`RELEASE_PUBKEY`, and updating the secret (see the `sign` module docs).
+Releases before signing have no `.sig`; install those by hand.
+
+### Streaming to a blocked kiosk
+
+Some proxies refuse the binary download on the kiosk even through
+catproxy. `catc stage update --stream` downloads and verifies the binary
+on the operator box, then pushes it to each stage as encrypted chunks
+over the broker (`UpdateStream` / `UpdateChunk` / `UpdateStreamEnd`,
+with the stage re-requesting any chunk dropped on a reconnect via
+`UpdateNeed`). The stage verifies the SHA-256 and signature on the
+assembled bytes before the usual swap/relaunch. Slower than a download,
+but it needs no proxy exception.
+
+### Updating catc itself
+
+`catc self-update [--version vX.Y.Z]` swaps the running CLI in place to a
+release, verifying the SHA-256 and signature, then runs the new binary's
+`--version` to confirm before keeping it. Nothing updates catc
+automatically; `catc version` and `catc stage list --probe` tell you when
+a newer release exists.
+
 ### Cloudflare Worker deploy
 
 The production broker (`crates/catsocks`) is a Rust crate compiled to
