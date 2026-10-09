@@ -1,3 +1,4 @@
+pub mod sign;
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

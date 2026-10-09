@@ -12,3 +12,4 @@ base64 = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 url = { workspace = true }
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "zeroize"] }
