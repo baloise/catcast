@@ -23,6 +23,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
+    env:
+      # Exposed at job level so the signing step's `if` can test it — the
+      # `secrets` context is not available in step `if` conditions.
+      SIGNING_KEY: ${{ secrets.CATCAST_RELEASE_KEY_PEM }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -60,10 +64,8 @@ jobs:
             if command -v sha256sum >/dev/null; then sha256sum "$f"; else shasum -a 256 "$f"; fi > "$f.sha256"
           done
       - name: Sign binaries (Ed25519)
-        if: ${{ secrets.CATCAST_RELEASE_KEY_PEM != '' }}
+        if: env.SIGNING_KEY != ''
         shell: bash
-        env:
-          SIGNING_KEY: ${{ secrets.CATCAST_RELEASE_KEY_PEM }}
         run: |
           # Detached raw-Ed25519 signature over each binary, hex-encoded into
           # a `.sig` sidecar. catstage/catc verify it against the key compiled
