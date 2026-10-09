@@ -124,7 +124,10 @@ mod tests {
 
     #[test]
     fn rejects_malformed_signature() {
-        assert_eq!(verify_with(&VEC_PUB, VEC_MSG, "zz"), Err(SignatureError::BadSigHex));
+        assert_eq!(
+            verify_with(&VEC_PUB, VEC_MSG, "zz"),
+            Err(SignatureError::BadSigHex)
+        );
         assert_eq!(
             verify_with(&VEC_PUB, VEC_MSG, "abcd"),
             Err(SignatureError::BadSigLen(2))
