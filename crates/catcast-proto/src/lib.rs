@@ -184,7 +184,38 @@ pub enum Message {
         /// Lowercase hex SHA-256 of the decoded binary.
         sha256: String,
         encoding: UpdateEncoding,
+        /// Hex Ed25519 signature over the binary (the release `.sig`
+        /// sidecar). Verified against the key compiled into the stage. A
+        /// stage that enforces signatures refuses the update when this is
+        /// absent; older stages ignore the field. `#[serde(default)]` keeps
+        /// the wire backward compatible.
+        #[serde(default)]
+        sig: Option<String>,
     },
+    /// Begin a broker-streamed update: the operator has already downloaded
+    /// and verified the binary, and pushes it as `UpdateChunk`s instead of
+    /// pointing the stage at a URL. For kiosks whose proxy blocks the
+    /// download. Always signed — streaming exists to move trusted bytes.
+    UpdateStream {
+        version: String,
+        /// Raw (decoded) length, for a sanity check before assembling.
+        total_len: u64,
+        /// Lowercase hex SHA-256 of the assembled binary.
+        sha256: String,
+        /// Hex Ed25519 signature over the assembled binary.
+        sig: String,
+        chunk_count: u32,
+        /// Raw bytes per chunk before base64 (the last chunk may be shorter).
+        chunk_bytes: u32,
+    },
+    /// One chunk of a streamed update; `data` is base64 of the raw slice at
+    /// index `seq`.
+    UpdateChunk {
+        seq: u32,
+        data: String,
+    },
+    /// All chunks sent — assemble, verify and install.
+    UpdateStreamEnd,
 
     // ─── Stage -> CLI ────────────────────────────────────────────────────
     /// Snapshot of the stage's current State. Sent unsolicited on connect
@@ -217,6 +248,12 @@ pub enum Message {
     /// this says how it got there.
     TraceData {
         entries: Vec<TraceEntry>,
+    },
+    /// Stage → CLI during a streamed update: these chunk indices are still
+    /// missing (dropped on a reconnect); the CLI resends them. An empty list
+    /// is not sent — completion is signalled by the normal `Reply` flow.
+    UpdateNeed {
+        missing: Vec<u32>,
     },
 }
 

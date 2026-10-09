@@ -592,6 +592,10 @@ async fn bootstrap(
     let handler_logic = Arc::clone(&logic_handle);
     let handler_out = Arc::clone(&out_tx);
     let handler_app = app.clone();
+    // Broker-streamed updates arrive across many messages; the partially
+    // received binary lives here between them.
+    let stream_state: Arc<Mutex<Option<update::StreamState>>> = Arc::new(Mutex::new(None));
+    let handler_stream = Arc::clone(&stream_state);
     let handler: socks::InboundHandler = Arc::new(move |pt| {
         let pt_msg = pt.msg.clone();
         let shared = Arc::clone(&handler_shared);
@@ -599,8 +603,9 @@ async fn bootstrap(
         let logic = Arc::clone(&handler_logic);
         let out = Arc::clone(&handler_out);
         let app = handler_app.clone();
+        let stream = Arc::clone(&handler_stream);
         tokio::spawn(async move {
-            dispatch(pt_msg, shared, sched, logic, out, app).await;
+            dispatch(pt_msg, shared, sched, logic, out, stream, app).await;
         });
     });
 
@@ -784,14 +789,17 @@ fn broadcast(out: &Arc<Mutex<Option<tokio::sync::mpsc::Sender<Message>>>>, msg: 
     let _ = tx.try_send(msg);
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch(
     msg: Message,
     shared: Arc<Mutex<Shared>>,
     sched: tokio::sync::mpsc::Sender<scheduler::Cmd>,
     logic_handle: Arc<Mutex<Option<LogicHandle>>>,
     out: Arc<Mutex<Option<tokio::sync::mpsc::Sender<Message>>>>,
+    stream: Arc<Mutex<Option<update::StreamState>>>,
     app: tauri::AppHandle,
 ) {
+    use base64::Engine as _;
     use scheduler::Cmd;
 
     // Every command produces exactly one Reply back to the CLI so the operator
@@ -945,12 +953,14 @@ async fn dispatch(
             url,
             sha256,
             encoding,
+            sig,
         } => {
             let req = update::Request {
                 version,
                 url,
                 sha256,
                 encoding,
+                sig,
             };
             match update::begin(&req) {
                 Err(e) => Some(Err(format!("update refused: {e:#}"))),
@@ -1003,11 +1013,114 @@ async fn dispatch(
                 }
             }
         }
+        Message::UpdateStream {
+            version,
+            total_len,
+            sha256,
+            sig,
+            chunk_count,
+            chunk_bytes,
+        } => {
+            let meta = update::StreamMeta {
+                version: version.clone(),
+                total_len,
+                sha256,
+                sig,
+                chunk_count,
+                chunk_bytes,
+            };
+            match update::begin_stream(meta) {
+                Ok(st) => {
+                    *stream.lock().unwrap() = Some(st);
+                    Some(Ok(format!("receiving v{version} in {chunk_count} chunks")))
+                }
+                Err(e) => Some(Err(format!("stream refused: {e:#}"))),
+            }
+        }
+        Message::UpdateChunk { seq, data } => {
+            match base64::engine::general_purpose::STANDARD.decode(data.as_bytes()) {
+                Ok(bytes) => {
+                    if let Some(st) = stream.lock().unwrap().as_mut() {
+                        st.add_chunk(seq, bytes);
+                    }
+                }
+                Err(e) => eprintln!("catstage: bad base64 in chunk {seq}: {e}"),
+            }
+            None // chunks are acked in bulk by UpdateStreamEnd, not individually
+        }
+        Message::UpdateStreamEnd => {
+            enum Act {
+                NoStream,
+                Need(Vec<u32>),
+                Install(Box<update::StreamState>),
+            }
+            let act = {
+                let mut g = stream.lock().unwrap();
+                match g.as_ref() {
+                    None => Act::NoStream,
+                    Some(st) if st.is_complete() => {
+                        Act::Install(Box::new(g.take().expect("just checked Some")))
+                    }
+                    Some(st) => Act::Need(st.missing()),
+                }
+            };
+            match act {
+                Act::NoStream => Some(Err("no active update stream".into())),
+                Act::Need(missing) => {
+                    broadcast(&out, Message::UpdateNeed { missing });
+                    None
+                }
+                Act::Install(st) => {
+                    let ver = st.version().to_string();
+                    broadcast(
+                        &out,
+                        Message::Reply {
+                            ok: true,
+                            message: format!("received v{ver} — installing"),
+                        },
+                    );
+                    let launch_args = app
+                        .try_state::<crate::about::TauriCtx>()
+                        .map(|c| c.inner().launch_args.clone())
+                        .unwrap_or_default();
+                    let out = Arc::clone(&out);
+                    let app = app.clone();
+                    tokio::spawn(async move {
+                        match update::finish_stream(*st, launch_args).await {
+                            Ok(()) => {
+                                broadcast(
+                                    &out,
+                                    Message::Reply {
+                                        ok: true,
+                                        message: format!("updated to v{ver} — restarting"),
+                                    },
+                                );
+                                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                                eprintln!("catstage: exiting so v{ver} can take over");
+                                app.exit(0);
+                            }
+                            Err(e) => {
+                                eprintln!("catstage: streamed update failed: {e:#}");
+                                broadcast(
+                                    &out,
+                                    Message::Reply {
+                                        ok: false,
+                                        message: format!("update failed: {e:#}"),
+                                    },
+                                );
+                            }
+                        }
+                    });
+                    None
+                }
+            }
+        }
         Message::State(_)
         | Message::Reply { .. }
         | Message::ConfigData { .. }
         | Message::LogicData { .. }
-        | Message::TraceData { .. } => None,
+        | Message::TraceData { .. }
+        | Message::UpdateNeed { .. } => None,
     };
 
     if let Some(res) = outcome {

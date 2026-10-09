@@ -444,6 +444,7 @@ name = "catc"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "catcast-core",
  "catcast-net",
  "catcast-proto",
@@ -484,7 +485,11 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "catcast-proto",
  "ed25519-dalek",
+ "futures-util",
+ "reqwest",
+ "sha2",
  "tokio",
  "tokio-tungstenite",
  "url",
