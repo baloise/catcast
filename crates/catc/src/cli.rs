@@ -95,6 +95,16 @@ pub enum Cmd {
     Shutdown(Targets),
     /// Print catc's version and the latest published release.
     Version,
+    /// Update this catc binary in place to a release (verifies SHA-256 and
+    /// the Ed25519 signature before swapping).
+    SelfUpdate {
+        /// Release to install, e.g. v0.3.0. Default: the latest release.
+        #[arg(long)]
+        version: Option<String>,
+        /// Reinstall the same version, or downgrade.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -235,6 +245,15 @@ pub struct UpdateOpts {
     /// With --url: the URL serves the raw binary, not base64 text.
     #[arg(long, requires = "url")]
     pub raw: bool,
+    /// Hex Ed25519 signature of the binary, required with --url (releases
+    /// carry a `.sig` sidecar that is fetched automatically).
+    #[arg(long, requires = "url")]
+    pub sig: Option<String>,
+    /// Stream the verified binary to each stage over the broker instead of
+    /// having the stage download it. For kiosks whose proxy blocks the
+    /// download. catc downloads and verifies the binary locally first.
+    #[arg(long)]
+    pub stream: bool,
     #[command(flatten)]
     pub targets: Targets,
 }
@@ -362,6 +381,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Cmd::Trace(t) => cmd_trace(t).await,
         Cmd::Shutdown(t) => cmd_send(t, Message::Shutdown).await,
         Cmd::Version => cmd_version().await,
+        Cmd::SelfUpdate { version, force } => cmd_self_update(version, force).await,
     }
 }
 
@@ -833,8 +853,8 @@ async fn cmd_stage_update(o: UpdateOpts) -> Result<()> {
         bail!("nothing to update");
     }
 
-    // One asset URL + hash per platform among the selected stages.
-    let mut per_platform: HashMap<String, (String, String)> = HashMap::new();
+    // One asset URL + hash + signature per platform among the selected stages.
+    let mut per_platform: HashMap<String, (String, String, Option<String>)> = HashMap::new();
     for (_, platform) in &selected {
         if per_platform.contains_key(platform) {
             continue;
@@ -846,18 +866,26 @@ async fn cmd_stage_update(o: UpdateOpts) -> Result<()> {
                 if distinct.len() > 1 {
                     bail!("--url/--sha256 apply to one platform at a time; narrow the targets");
                 }
-                (u.clone(), h.trim().to_ascii_lowercase())
+                (u.clone(), h.trim().to_ascii_lowercase(), o.sig.clone())
             }
             _ => {
                 let raw = release::asset_url(&cfg.update_url, &target, platform);
                 let hash = release::fetch_sha256(&cfg.update_url, &target, platform)
                     .await
                     .with_context(|| format!("checksum for {platform}"))?;
+                let sig = release::fetch_sig_of(
+                    &cfg.update_url,
+                    release::Binary::Catstage,
+                    &target,
+                    platform,
+                )
+                .await
+                .with_context(|| format!("signature for {platform}"))?;
                 let url = match &cfg.update_proxy {
                     Some(px) => release::proxied_url(px, &raw),
                     None => raw,
                 };
-                (url, hash)
+                (url, hash, sig)
             }
         };
         per_platform.insert(platform.clone(), entry);
@@ -867,6 +895,62 @@ async fn cmd_stage_update(o: UpdateOpts) -> Result<()> {
     } else {
         UpdateEncoding::Base64
     };
+
+    // Streamed delivery: catc downloads and verifies each binary locally, then
+    // pushes the bytes to each stage over the end-to-end-encrypted broker.
+    if o.stream {
+        let mut raws: HashMap<String, Vec<u8>> = HashMap::new();
+        for (_, platform) in &selected {
+            if raws.contains_key(platform) {
+                continue;
+            }
+            let (url, hash, sig) = &per_platform[platform];
+            let sig = sig.clone().ok_or_else(|| {
+                anyhow!("{platform}: no signature — streaming needs a signed release (or --url with --sig)")
+            })?;
+            let bytes = fetch_and_verify_local(url, encoding, hash, &sig)
+                .await
+                .with_context(|| format!("prepare {platform} binary"))?;
+            println!(
+                "prepared {platform} binary: {} bytes, sha256 + signature ok",
+                bytes.len()
+            );
+            raws.insert(platform.clone(), bytes);
+        }
+        let mut all_ok = true;
+        for (n, platform) in &selected {
+            let (_, hash, sig) = &per_platform[platform];
+            let sig = sig.clone().expect("signature checked above");
+            let bytes = &raws[platform];
+            println!(
+                "{n}: streaming v{target} ({} bytes) over the broker…",
+                bytes.len()
+            );
+            match stream_to_stage(
+                &mut br,
+                &keys,
+                n,
+                bytes,
+                target.to_string(),
+                hash.clone(),
+                sig,
+                Duration::from_secs(o.timeout_secs),
+            )
+            .await
+            {
+                Ok(()) => println!("{n}: updated to v{target}"),
+                Err(e) => {
+                    println!("{n}: ERR {e:#}");
+                    all_ok = false;
+                }
+            }
+        }
+        br.close().await;
+        if !all_ok {
+            bail!("one or more stages were not updated");
+        }
+        return Ok(());
+    }
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Phase {
@@ -878,7 +962,7 @@ async fn cmd_stage_update(o: UpdateOpts) -> Result<()> {
     }
     let mut phase: HashMap<String, Phase> = HashMap::new();
     for (n, platform) in &selected {
-        let (url, sha256) = per_platform[platform].clone();
+        let (url, sha256, sig) = per_platform[platform].clone();
         br.send(
             keys.get(n).expect("key just derived"),
             n,
@@ -887,6 +971,7 @@ async fn cmd_stage_update(o: UpdateOpts) -> Result<()> {
                 url,
                 sha256,
                 encoding,
+                sig,
             },
         )
         .await?;
@@ -1047,6 +1132,235 @@ async fn hint_stale_logic(
             _ => {}
         }
     }
+    Ok(())
+}
+
+/// Download `url` into memory, decode per `encoding`, and verify the SHA-256
+/// and Ed25519 signature. No platform magic check here — the bytes may be for
+/// another OS (streaming to a Windows kiosk from Linux); the receiving stage
+/// checks its own magic. Returns the raw binary.
+async fn fetch_and_verify_local(
+    url: &str,
+    encoding: catcast_proto::UpdateEncoding,
+    sha256: &str,
+    sig: &str,
+) -> Result<Vec<u8>> {
+    use catcast_net::update::{self as core, Sink};
+    use std::fs::File;
+
+    let tmp = std::env::temp_dir().join(format!(
+        "catc-stream-{}-{}.bin",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let f = File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+    let mut sink = Sink::new(f, encoding);
+    let res = async {
+        core::download(url, &mut sink).await?;
+        let done = sink.finish()?;
+        let want = sha256.trim().to_ascii_lowercase();
+        if done.sha256 != want {
+            bail!("sha256 mismatch: expected {want}, got {}", done.sha256);
+        }
+        let bytes = std::fs::read(&tmp).with_context(|| format!("read {}", tmp.display()))?;
+        core::verify_signature(&bytes, sig)?;
+        Ok(bytes)
+    }
+    .await;
+    let _ = std::fs::remove_file(&tmp);
+    res
+}
+
+/// Stream a verified binary to one stage: announce, send chunks, then
+/// resend whatever the stage reports missing until it installs or we time
+/// out. 48 KiB raw per chunk keeps each broker frame well under a megabyte.
+#[allow(clippy::too_many_arguments)]
+async fn stream_to_stage(
+    br: &mut Broker,
+    keys: &HashMap<String, catcast_proto::Key>,
+    name: &str,
+    raw: &[u8],
+    version: String,
+    sha256: String,
+    sig: String,
+    timeout: Duration,
+) -> Result<()> {
+    use base64::Engine as _;
+    const CHUNK: usize = 48 * 1024;
+
+    let key = keys.get(name).expect("key for target");
+    let chunks: Vec<&[u8]> = raw.chunks(CHUNK).collect();
+    let b64 = |c: &[u8]| base64::engine::general_purpose::STANDARD.encode(c);
+
+    br.send(
+        key,
+        name,
+        &Message::UpdateStream {
+            version: version.clone(),
+            total_len: raw.len() as u64,
+            sha256,
+            sig,
+            chunk_count: chunks.len() as u32,
+            chunk_bytes: CHUNK as u32,
+        },
+    )
+    .await?;
+    for (i, c) in chunks.iter().enumerate() {
+        br.send(
+            key,
+            name,
+            &Message::UpdateChunk {
+                seq: i as u32,
+                data: b64(c),
+            },
+        )
+        .await?;
+    }
+    br.send(key, name, &Message::UpdateStreamEnd).await?;
+
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if std::time::Instant::now() >= deadline {
+            bail!("timed out waiting for the stage to install");
+        }
+        let mut need: Vec<u32> = Vec::new();
+        let mut result: Option<std::result::Result<(), String>> = None;
+        let window = (deadline - std::time::Instant::now()).min(Duration::from_secs(5));
+        br.collect_until(keys, window, |nm, pt| {
+            if nm != name {
+                return false;
+            }
+            match pt.msg {
+                Message::UpdateNeed { missing } => {
+                    need = missing;
+                    true
+                }
+                Message::Reply { ok: false, message } => {
+                    result = Some(Err(message));
+                    true
+                }
+                Message::Reply { ok: true, message } => {
+                    if message.contains("restarting") {
+                        result = Some(Ok(()));
+                        true
+                    } else {
+                        println!("  {nm}: {message}");
+                        false
+                    }
+                }
+                Message::State(s) if s.version == version => {
+                    result = Some(Ok(()));
+                    true
+                }
+                _ => false,
+            }
+        })
+        .await;
+
+        if let Some(r) = result {
+            return r.map_err(|m| anyhow!(m));
+        }
+        if !need.is_empty() {
+            for seq in need {
+                if let Some(c) = chunks.get(seq as usize) {
+                    br.send(key, name, &Message::UpdateChunk { seq, data: b64(c) })
+                        .await?;
+                }
+            }
+            br.send(key, name, &Message::UpdateStreamEnd).await?;
+        } else {
+            // Quiet window: nudge so the post-install State is seen promptly.
+            br.send(key, name, &Message::GetState).await?;
+        }
+    }
+}
+
+async fn cmd_self_update(version: Option<String>, force: bool) -> Result<()> {
+    use catcast_net::update as core;
+    use catcast_proto::UpdateEncoding;
+    use semver::Version;
+
+    let me = env!("CARGO_PKG_VERSION");
+    let me_v = Version::parse(me).expect("own version parses");
+    let cfg = CatcConfig::load().unwrap_or_default();
+    let platform = catcast_core::platform_tag();
+
+    let target: Version = match &version {
+        Some(v) => {
+            let v = v.trim();
+            Version::parse(v.strip_prefix('v').unwrap_or(v))
+                .with_context(|| format!("parse --version {v:?}"))?
+        }
+        None => match release::lookup(&cfg.update_url).await {
+            Some(r) => r.context("look up the latest release (or pass --version)")?,
+            None => bail!("update_url is empty in catc.toml — pass --version"),
+        },
+    };
+
+    if target == me_v && !force {
+        println!("catc is already v{me}");
+        return Ok(());
+    }
+    if target < me_v && !force {
+        bail!("v{target} is older than the running v{me}; pass --force to downgrade");
+    }
+
+    let raw_url = release::asset_url_of(&cfg.update_url, release::Binary::Catc, &target, &platform);
+    let hash = release::fetch_sha256_of(&cfg.update_url, release::Binary::Catc, &target, &platform)
+        .await
+        .context("fetch catc checksum")?;
+    let sig = release::fetch_sig_of(&cfg.update_url, release::Binary::Catc, &target, &platform)
+        .await
+        .context("fetch catc signature")?
+        .ok_or_else(|| anyhow!("v{target} has no .sig sidecar — download catc yourself"))?;
+    let (url, encoding) = match &cfg.update_proxy {
+        Some(px) => (release::proxied_url(px, &raw_url), UpdateEncoding::Base64),
+        None => (raw_url, UpdateEncoding::Raw),
+    };
+
+    let paths = core::paths()?;
+    let file = std::fs::File::create(&paths.new).with_context(|| {
+        format!(
+            "create {} (is the directory writable?)",
+            paths.new.display()
+        )
+    })?;
+    let staged = async {
+        let mut sink = core::Sink::new(file, encoding);
+        core::download(&url, &mut sink).await?;
+        let done = sink.finish()?;
+        core::verify(&done, &hash)?; // our own platform → magic check applies
+        core::verify_signature_file(&paths.new, &sig)?;
+        anyhow::Ok(done.len)
+    }
+    .await;
+    let len = match staged {
+        Ok(len) => len,
+        Err(e) => {
+            let _ = std::fs::remove_file(&paths.new);
+            return Err(e.context("stage the new catc"));
+        }
+    };
+    println!("downloaded catc v{target} ({len} bytes, sha256 + signature ok)");
+
+    core::unblock(&paths.new);
+    core::swap(&paths).context("swap the catc binary")?;
+
+    // Confirm the swapped-in binary reports the target version; roll back if not.
+    let out = std::process::Command::new(&paths.exe)
+        .arg("--version")
+        .output()
+        .context("run the new catc --version")?;
+    let reported = String::from_utf8_lossy(&out.stdout);
+    if !reported.contains(&target.to_string()) {
+        core::rollback(&paths).context("roll back after a failed version check")?;
+        bail!("new catc reported {reported:?}, expected v{target} — rolled back");
+    }
+    let _ = std::fs::remove_file(&paths.old);
+    println!("catc updated to v{target}");
     Ok(())
 }
 

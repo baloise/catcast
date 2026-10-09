@@ -97,22 +97,43 @@ impl Freshness {
     }
 }
 
-/// Release asset name for a stage platform tag (`windows-x64` → `.exe`).
-pub fn asset_name(platform: &str) -> String {
+/// Which binary a release asset is for. Both share the same naming and
+/// signing; only the prefix differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Binary {
+    Catstage,
+    Catc,
+}
+
+impl Binary {
+    fn prefix(self) -> &'static str {
+        match self {
+            Binary::Catstage => "catstage",
+            Binary::Catc => "catc",
+        }
+    }
+}
+
+/// Release asset name for a binary + platform tag (`windows-x64` → `.exe`).
+pub fn asset_name_of(which: Binary, platform: &str) -> String {
     let ext = if platform.starts_with("windows") {
         ".exe"
     } else {
         ""
     };
-    format!("catstage-{platform}{ext}")
+    format!("{}-{platform}{ext}", which.prefix())
 }
 
-pub fn asset_url(base: &str, version: &Version, platform: &str) -> String {
+pub fn asset_url_of(base: &str, which: Binary, version: &Version, platform: &str) -> String {
     format!(
         "{}/releases/download/v{version}/{}",
         base.trim_end_matches('/'),
-        asset_name(platform)
+        asset_name_of(which, platform)
     )
+}
+
+pub fn asset_url(base: &str, version: &Version, platform: &str) -> String {
+    asset_url_of(base, Binary::Catstage, version, platform)
 }
 
 /// The same asset through catproxy's base64 route.
@@ -127,30 +148,67 @@ pub fn parse_sha256(text: &str) -> Option<String> {
         .map(|t| t.to_ascii_lowercase())
 }
 
-/// Fetch `<asset>.sha256` published next to the release asset.
-pub async fn fetch_sha256(base: &str, version: &Version, platform: &str) -> Result<String> {
-    let url = format!("{}.sha256", asset_url(base, version, platform));
+async fn get_text(url: &str) -> Result<Option<String>> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .user_agent(concat!("catc/", env!("CARGO_PKG_VERSION")))
         .build()
         .context("build http client")?;
     let res = client
-        .get(&url)
+        .get(url)
         .send()
         .await
         .with_context(|| format!("GET {url}"))?;
     if res.status().as_u16() == 404 {
-        bail!(
-            "{url} not found — releases before the checksum sidecars cannot be pushed remotely; \
-             download the binary yourself and pass --url/--sha256"
-        );
+        return Ok(None);
     }
     let res = res
         .error_for_status()
         .with_context(|| format!("GET {url}"))?;
-    let body = res.text().await.with_context(|| format!("read {url}"))?;
+    Ok(Some(
+        res.text().await.with_context(|| format!("read {url}"))?,
+    ))
+}
+
+/// Fetch `<asset>.sha256` published next to a binary's release asset.
+pub async fn fetch_sha256_of(
+    base: &str,
+    which: Binary,
+    version: &Version,
+    platform: &str,
+) -> Result<String> {
+    let url = format!("{}.sha256", asset_url_of(base, which, version, platform));
+    let body = get_text(&url).await?.ok_or_else(|| {
+        anyhow!(
+            "{url} not found — releases before the checksum sidecars cannot be pushed remotely;              download the binary yourself and pass --url/--sha256"
+        )
+    })?;
     parse_sha256(&body).ok_or_else(|| anyhow!("{url}: no sha256 in {body:?}"))
+}
+
+pub async fn fetch_sha256(base: &str, version: &Version, platform: &str) -> Result<String> {
+    fetch_sha256_of(base, Binary::Catstage, version, platform).await
+}
+
+/// Fetch `<asset>.sig` (hex Ed25519) next to a binary's release asset.
+/// `None` when the release predates signing (no sidecar), so callers can
+/// explain rather than fail cryptically.
+pub async fn fetch_sig_of(
+    base: &str,
+    which: Binary,
+    version: &Version,
+    platform: &str,
+) -> Result<Option<String>> {
+    let url = format!("{}.sig", asset_url_of(base, which, version, platform));
+    let Some(body) = get_text(&url).await? else {
+        return Ok(None);
+    };
+    let hex: String = body.split_whitespace().collect();
+    if hex.len() == 128 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(Some(hex))
+    } else {
+        bail!("{url}: not a 64-byte hex signature ({:?})", body)
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -201,8 +259,19 @@ mod tests {
     #[test]
     fn asset_urls() {
         let v = v("0.2.0");
-        assert_eq!(asset_name("windows-x64"), "catstage-windows-x64.exe");
-        assert_eq!(asset_name("linux-x64"), "catstage-linux-x64");
+        assert_eq!(
+            asset_name_of(Binary::Catstage, "windows-x64"),
+            "catstage-windows-x64.exe"
+        );
+        assert_eq!(
+            asset_name_of(Binary::Catstage, "linux-x64"),
+            "catstage-linux-x64"
+        );
+        assert_eq!(
+            asset_name_of(Binary::Catc, "windows-x64"),
+            "catc-windows-x64.exe"
+        );
+        assert_eq!(asset_name_of(Binary::Catc, "linux-x64"), "catc-linux-x64");
         assert_eq!(
             asset_url("https://github.com/baloise/catcast/", &v, "windows-x64"),
             "https://github.com/baloise/catcast/releases/download/v0.2.0/catstage-windows-x64.exe"
