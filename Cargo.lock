@@ -441,7 +441,7 @@ dependencies = [
 
 [[package]]
 name = "catc"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -466,7 +466,7 @@ dependencies = [
 
 [[package]]
 name = "catcast-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "cargo-husky",
  "chrono",
@@ -481,7 +481,7 @@ dependencies = [
 
 [[package]]
 name = "catcast-net"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -497,7 +497,7 @@ dependencies = [
 
 [[package]]
 name = "catcast-proto"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -514,7 +514,7 @@ dependencies = [
 
 [[package]]
 name = "catsocks"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "axum",
  "clap",
@@ -530,7 +530,7 @@ dependencies = [
 
 [[package]]
 name = "catstage"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
