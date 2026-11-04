@@ -485,11 +485,15 @@ async fn bootstrap(
         RunMode::Online { .. } | RunMode::Offline => {
             // Hydrate Shared from disk. Online and Offline both consume the
             // same persisted config.yaml / logic.rhai / state.json.
-            if let Some(s) = persist::load_state()? {
+            //
+            // An unreadable file is logged and treated as absent, never
+            // fatal: bailing here would skip the scheduler and the broker,
+            // and the broker is how an operator repairs a stage remotely.
+            if let Some(s) = or_absent("state.json", persist::load_state()) {
                 shared.lock().unwrap().state = s;
             }
-            let config_yaml = persist::load_config_yaml()?;
-            let logic_rhai = persist::load_logic_rhai()?;
+            let config_yaml = or_absent("config.yaml", persist::load_config_yaml());
+            let logic_rhai = or_absent("logic.rhai", persist::load_logic_rhai());
             {
                 let mut sh = shared.lock().unwrap();
                 sh.state.name = name.clone();
@@ -636,6 +640,14 @@ async fn bootstrap(
     let _ = outbound.send(Message::State(snapshot)).await;
 
     Ok(())
+}
+
+/// A persisted file that fails to load counts as absent; the error is logged.
+fn or_absent<T>(what: &str, loaded: Result<Option<T>>) -> Option<T> {
+    loaded.unwrap_or_else(|e| {
+        eprintln!("catstage: ignoring unreadable {what}: {e:#}");
+        None
+    })
 }
 
 fn default_name() -> String {
