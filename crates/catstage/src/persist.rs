@@ -15,6 +15,7 @@ use anyhow::{Context, Result};
 use catcast_core::{Mode, State};
 use directories::ProjectDirs;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Locate (and create on demand) the catstage config directory.
@@ -111,12 +112,23 @@ fn migrate_state_v1_to_v2(mut v: serde_json::Value) -> serde_json::Value {
 }
 
 fn write_atomic(p: &Path, content: &str) -> Result<()> {
-    // Write to <name>.tmp then rename — keeps existing file intact on crash.
+    // Write to <name>.<pid>.tmp, flush it to disk, then rename over the
+    // target — keeps the existing file intact on crash.
+    //
+    // The flush matters on kiosks that lose power: without it the rename
+    // can reach the disk before the data does, leaving a target full of
+    // NUL bytes. The pid matters during a self-update, when the old and
+    // the new stage run side by side and would share one temp file.
     let tmp = p.with_extension(format!(
-        "{}.tmp",
-        p.extension().and_then(|s| s.to_str()).unwrap_or("")
+        "{}.{}.tmp",
+        p.extension().and_then(|s| s.to_str()).unwrap_or(""),
+        std::process::id()
     ));
-    fs::write(&tmp, content).with_context(|| format!("writing {}", tmp.display()))?;
+    let mut f = fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+    f.write_all(content.as_bytes())
+        .and_then(|()| f.sync_all())
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    drop(f);
     fs::rename(&tmp, p)
         .with_context(|| format!("renaming {} -> {}", tmp.display(), p.display()))?;
     Ok(())
@@ -153,6 +165,22 @@ mod tests {
         std::fs::write(&path, s).unwrap();
         let read: State = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(read.name, "kitchen");
+    }
+
+    #[test]
+    fn write_atomic_replaces_target_and_leaves_no_temp_file() {
+        let dir = tempdir().join("write-atomic");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        std::fs::write(&path, "old").unwrap();
+        write_atomic(&path, "{\"new\":true}").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"new\":true}");
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("state.json")]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
