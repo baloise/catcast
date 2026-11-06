@@ -31,10 +31,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # A hung Ubuntu mirror once held both Linux jobs in `apt-get update`
+      # for 30+ minutes: time each attempt out, retry, and cap the step.
       - if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          apt="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          for i in 1 2 3; do timeout 240 sudo apt-get $apt update && break; [ $i = 3 ] && exit 1; sleep 10; done
+          sudo apt-get $apt install -y \
             libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
@@ -43,18 +47,15 @@ jobs:
             build-essential \
             file
       - name: Build binaries
-        if: matrix.os != 'windows-latest'
         run: cargo build --release -p catstage -p catc
-      # Windows: one LTO build of catstage, not two. `tauri build` compiles
-      # catstage with its own flags anyway, so a separate `cargo build` of it
-      # was thrown away; the exe asset is now the same binary the MSI ships.
-      # The CLI comes prebuilt from npm (was `cargo install tauri-cli`, ~7 min).
-      - name: Build binaries + MSI (Windows)
+      # The Tauri CLI comes prebuilt from npm: `cargo install tauri-cli`
+      # compiled it for ~7 min. Keep the `cargo build` above: `tauri build`
+      # reuses it and only rebuilds the top of catstage (~2 min); without it
+      # the whole catstage tree builds here (~8 min).
+      - name: Build MSI (Windows)
         if: matrix.os == 'windows-latest'
         shell: bash
-        run: |
-          cargo build --release -p catc
-          npx --yes @tauri-apps/cli@2.11.1 build --bundles msi
+        run: npx --yes @tauri-apps/cli@2.11.1 build --bundles msi
       - name: Stage artifacts
         shell: bash
         run: |
