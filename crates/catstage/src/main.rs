@@ -186,8 +186,38 @@ struct Args {
     /// instead of rotating URLs. Without `--name`, the stage generates a
     /// random name once (remembered as `mirror.name`) and shows it on its
     /// about page as text and QR code; pair it with `catc relay pair`.
-    #[arg(long, conflicts_with_all = ["offline", "url"])]
+    ///
+    /// Remembered like `--socks`: later plain starts stay a mirror until
+    /// `--no-mirror`.
+    #[arg(long, conflicts_with_all = ["offline", "url", "no_mirror"])]
     mirror: bool,
+
+    /// Turn a remembered mirror back into a normal stage.
+    #[arg(long, conflicts_with_all = ["offline", "url"])]
+    no_mirror: bool,
+
+    /// With `--install-autostart`: also start the stage now, instead of
+    /// only installing it for the next login.
+    #[arg(long, requires = "install_autostart")]
+    start: bool,
+}
+
+/// `--mirror` / `--no-mirror` win and are remembered; without either, the
+/// remembered mode. Like [`resolve_socks`], only for online starts.
+fn resolve_mirror(args: &Args) -> bool {
+    if args.offline || args.url.is_some() {
+        return false;
+    }
+    if args.mirror || args.no_mirror {
+        if let Err(e) = persist::save_mirror_mode(args.mirror) {
+            eprintln!("catstage: could not remember --mirror: {e:#}");
+        }
+        return args.mirror;
+    }
+    persist::load_mirror_mode().unwrap_or_else(|e| {
+        eprintln!("catstage: could not read the remembered mirror mode: {e:#}");
+        false
+    })
 }
 
 /// `--socks` wins and is remembered for the next start; without it, the
@@ -287,12 +317,18 @@ fn main() -> Result<()> {
     }
 
     let args = Args::parse();
-    let name = match (&args.name, args.mirror) {
+    let mirror = resolve_mirror(&args);
+    let name = match (&args.name, mirror) {
         (Some(n), _) => n.clone(),
         (None, true) => persist::mirror_name().context("creating the mirror name")?,
         (None, false) => default_name(),
     };
-    if args.mirror && name.chars().count() < 16 {
+    if mirror {
+        // Also on stdout, so the name can be copied from a terminal
+        // instead of read off the screen.
+        println!("catstage: mirror name: {name}");
+    }
+    if mirror && name.chars().count() < 16 {
         eprintln!(
             "catstage: warning: mirror name {name:?} is short; frames are paired under it — \
              prefer the generated name (omit --name)"
@@ -308,22 +344,28 @@ fn main() -> Result<()> {
         if args.offline || args.url.is_some() {
             anyhow::bail!("--install-autostart needs a broker (offline autostart not supported)");
         }
-        let socks = socks.ok_or_else(no_socks_error)?;
+        let socks = socks.clone().ok_or_else(no_socks_error)?;
         if let Some(path) = autostart::install(&autostart::AutostartArgs {
             socks,
             name: args.name.clone(),
             screen,
-            mirror: args.mirror,
+            mirror,
         })? {
             eprintln!("catstage: autostart installed at {}", path.display());
         }
-        return Ok(());
+        if !args.start {
+            eprintln!(
+                "catstage: installed only; it starts at the next login. Start it now with \
+                 a plain `catstage`, or install with --start next time."
+            );
+            return Ok(());
+        }
     }
 
     let run_mode = match (args.offline, args.url.clone(), socks) {
         (true, _, _) => RunMode::Offline,
         (false, Some(url), _) => RunMode::SingleUrl { url },
-        (false, None, Some(socks)) if args.mirror => RunMode::Mirror { socks },
+        (false, None, Some(socks)) if mirror => RunMode::Mirror { socks },
         (false, None, Some(socks)) => RunMode::Online { socks },
         (false, None, None) => {
             eprintln!("catstage: {}", no_socks_error());
@@ -388,6 +430,19 @@ fn main() -> Result<()> {
                 if let Ok(url) = webview.url() {
                     trace::record(app, TraceKind::Loaded, url.as_str());
                     note_actual_url(app, url.as_str());
+                    let intended = app
+                        .try_state::<TauriCtx>()
+                        .and_then(|c| c.shared.lock().unwrap().state.current_url.clone());
+                    if let Some(intended) = intended {
+                        if fragment_lost(&intended, &url) && restore_once(&intended) {
+                            if let Ok(want) = tauri::Url::parse(&intended) {
+                                eprintln!(
+                                    "catstage: login detour dropped the #fragment; restoring it"
+                                );
+                                let _ = webview.eval(reload_with_url_js(&want));
+                            }
+                        }
+                    }
                 }
                 if let Some(roles) = app.try_state::<Roles>() {
                     if let Some(r) = &roles.relay {
@@ -955,12 +1010,80 @@ fn note_actual_url(app: &tauri::AppHandle, url: &str) {
     about::emit_state(app, WINDOW_LABEL);
 }
 
+/// The intended URL whose `#fragment` was already put back once, so a page
+/// that drops its own fragment cannot cause a reload loop. Cleared by every
+/// new navigation.
+static FRAGMENT_RESTORED: Mutex<Option<String>> = Mutex::new(None);
+
+fn restore_once(intended: &str) -> bool {
+    let mut done = FRAGMENT_RESTORED.lock().unwrap();
+    if done.as_deref() == Some(intended) {
+        return false;
+    }
+    *done = Some(intended.to_string());
+    true
+}
+
+/// `u` without its fragment, for "same document?" comparisons.
+fn sans_fragment(u: &tauri::Url) -> tauri::Url {
+    let mut u = u.clone();
+    u.set_fragment(None);
+    u
+}
+
+/// The webview finished on the intended page but without its `#fragment`:
+/// a login detour (Zscaler, Entra) remembers the URL without it.
+fn fragment_lost(intended: &str, loaded: &tauri::Url) -> bool {
+    let Ok(want) = tauri::Url::parse(intended) else {
+        return false;
+    };
+    want.fragment().is_some_and(|f| !f.is_empty())
+        && loaded.fragment().is_none_or(|f| f.is_empty())
+        && sans_fragment(&want) == sans_fragment(loaded)
+}
+
+/// Going from `current` to `target` changes only the fragment. The browser
+/// then stays on the same document, and pages that read the fragment only
+/// when they load (hash-configured dashboards) never see the new one.
+fn fragment_only_change(current: &tauri::Url, target: &tauri::Url) -> bool {
+    current != target && sans_fragment(current) == sans_fragment(target)
+}
+
+/// Put `url` (same document) into the address bar and reload, so the page
+/// starts over with its fragment. `history.replaceState` changes the URL
+/// synchronously; `location.replace` + `reload` raced and reloaded the old
+/// fragment. Takes the parsed URL: its string is percent-encoded UTF-8, so
+/// a page without a charset cannot re-encode `ä` as Latin-1.
+fn reload_with_url_js(url: &tauri::Url) -> String {
+    let lit = serde_json::to_string(url.as_str()).unwrap_or_else(|_| "\"\"".into());
+    format!("history.replaceState(history.state, \"\", {lit}); location.reload();")
+}
+
 /// Drive the kiosk webview to `url`.
 fn steer_webview(app: &tauri::AppHandle, url: &str) {
     let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
         return;
     };
-    if let Ok(parsed) = tauri::Url::parse(url) {
+    *FRAGMENT_RESTORED.lock().unwrap() = None;
+    let parsed = match tauri::Url::parse(url) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            // Config and nav are checked on arrival; only logic output can
+            // get here unparsed.
+            eprintln!("catstage: not navigating to {url:?}: {e}");
+            None
+        }
+    };
+    if let Some(parsed) = parsed {
+        if window
+            .url()
+            .is_ok_and(|current| fragment_only_change(&current, &parsed))
+        {
+            if let Err(e) = window.eval(reload_with_url_js(&parsed)) {
+                eprintln!("catstage: reload({url}) failed: {e}");
+            }
+            return;
+        }
         if let Err(e) = window.navigate(parsed) {
             eprintln!("catstage: navigate({url}) failed: {e}");
         }
@@ -1002,6 +1125,21 @@ async fn dispatch(
         }
         Message::Back => Some(step_rotation(&sched, -1, "back").await),
         Message::Forward => Some(step_rotation(&sched, 1, "forward").await),
+        Message::SetConfig { .. }
+        | Message::SetLogic { .. }
+        | Message::Nav { .. }
+        | Message::NavTimed { .. }
+            if is_mirror(&shared) =>
+        {
+            Some(Err(
+                "this is a mirror stage: it shows its relay's screen, not a rotation".into(),
+            ))
+        }
+        Message::Nav { url } | Message::NavTimed { url, .. }
+            if catcast_core::config::check_url(&url).is_err() =>
+        {
+            Some(Err(format!("not a URL the webview can open: {url:?}")))
+        }
         Message::Nav { url } => {
             let m = format!("navigating to {url}");
             let _ = sched.send(Cmd::Nav(url)).await;
@@ -1017,9 +1155,6 @@ async fn dispatch(
                 .await;
             Some(Ok(m))
         }
-        Message::SetConfig { .. } | Message::SetLogic { .. } if is_mirror(&shared) => Some(Err(
-            "this is a mirror stage: it shows its relay's screen, not a rotation".into(),
-        )),
         Message::SetConfig { yaml } => {
             Some(set_config(yaml, &shared, &sched, &logic_handle, &app).await)
         }
@@ -1614,4 +1749,54 @@ fn build_plan(
     let (plan, handle) = logic::evaluate(rhai, &cfg).context("evaluating Rhai logic")?;
     *logic_handle.lock().unwrap() = Some(handle);
     Ok(plan)
+}
+
+#[cfg(test)]
+mod fragment_tests {
+    use super::*;
+
+    fn u(s: &str) -> tauri::Url {
+        tauri::Url::parse(s).unwrap()
+    }
+
+    const DASH: &str = "https://catproxy.example/https://baloise.github.io/tv-dashboard/menu.html";
+
+    #[test]
+    fn a_login_detour_that_drops_the_fragment_is_noticed() {
+        let intended = format!("{DASH}#geek,flags");
+        assert!(fragment_lost(&intended, &u(DASH)));
+        assert!(!fragment_lost(&intended, &u(&intended)));
+        assert!(!fragment_lost(DASH, &u(DASH)), "nothing to restore");
+        assert!(!fragment_lost(&intended, &u("https://login.zscloud.net/x")));
+        // Same page, different query: not ours to fix.
+        assert!(!fragment_lost(&intended, &u(&format!("{DASH}?_sm_au_=1"))));
+    }
+
+    #[test]
+    fn fragment_only_changes_reload_instead_of_navigating() {
+        assert!(fragment_only_change(
+            &u(DASH),
+            &u(&format!("{DASH}#geek,flags"))
+        ));
+        assert!(fragment_only_change(
+            &u(&format!("{DASH}#a")),
+            &u(&format!("{DASH}#b"))
+        ));
+        assert!(!fragment_only_change(&u(DASH), &u(DASH)));
+        assert!(!fragment_only_change(
+            &u(DASH),
+            &u("https://example.com/#a")
+        ));
+    }
+
+    #[test]
+    fn reload_script_quotes_the_url_safely() {
+        let js = reload_with_url_js(&u("https://x.example/a?q=\"'ä#f,g"));
+        assert!(
+            js.contains(
+                "replaceState(history.state, \"\", \"https://x.example/a?q=%22%27%C3%A4#f,g\")"
+            ),
+            "{js}"
+        );
+    }
 }

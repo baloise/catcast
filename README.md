@@ -42,7 +42,8 @@ cd crates/catsocks && wrangler deploy
 # -> wss://catsocks.<your-acct>.workers.dev/r/<your-room>
 
 # 2. On each stage machine
-catstage.exe --install-autostart --socks wss://.../r/<room> --name kitchen --screen 2
+catstage.exe --install-autostart --start --socks wss://.../r/<room> --name kitchen --screen 2
+# --install-autostart only installs for the next login; --start also starts it now.
 # Optional: --screen is 1-based. If unavailable, catstage falls back to primary monitor.
 # --socks is remembered: later starts can be plain `catstage.exe`.
 
@@ -50,11 +51,26 @@ catstage.exe --install-autostart --socks wss://.../r/<room> --name kitchen --scr
 catc init --socks wss://.../r/<room>
 catc stage add kitchen        # the name shows on the stage's catcast://about page
 catc config import config.yaml --name kitchen
-catc nav https://example.com --for 5m
+catc nav 'https://example.com/board?team=a&view=tv#geek,flags' --for 5m
 catc status                   # broker, stages, mirrors: up/down, last seen, uptime
 ```
 
 See `examples/` for `config.yaml`, `aliases.yaml`, and a default Rhai logic.
+
+**URLs with `?`, `&`, `#` or spaces.** URLs travel and are stored exactly as
+written, but two layers in front of catcast parse them first:
+
+- **The shell.** Put the URL in single quotes on the `catc` command line:
+  unquoted, `&` sends the command to the background, `?` is a wildcard and
+  ` #` starts a comment.
+- **YAML.** In `config.yaml` a URL in a list (`- https://…`) or after
+  `url:` needs no quotes. Inside `[ … ]` or `{ … }` the comma splits it, so
+  quote it there (`["https://x/#geek,flags"]`).
+
+catc and the stage refuse a string that is not a URL. A page whose
+`#fragment` changes is reloaded so it reads the new one. When a proxy or
+single-sign-on login sends the kiosk back without its fragment, the stage
+puts the fragment back and reloads once.
 
 ## Mirror a stage outside the network
 

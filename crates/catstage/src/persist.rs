@@ -10,6 +10,8 @@
 //! - `relay.json`    — relay pairing (mirror name, frame secret, timing).
 //! - `mirror.json`   — mirror pairing (frame secret).
 //! - `mirror.name`   — the generated name of a `--mirror` stage.
+//! - `mirror.mode`   — present while the stage is a mirror, so a plain start
+//!   stays one (`--mirror` creates it, `--no-mirror` removes it).
 //! - `frame.json` + `tiles/` — the mirror's last frame and its tile store.
 //! - `mirror-cache.json` — the mirror's tile-cache cap, when not the default.
 //!
@@ -50,6 +52,9 @@ pub fn relay_path() -> Result<PathBuf> {
 }
 pub fn mirror_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("mirror.json"))
+}
+pub fn mirror_mode_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("mirror.mode"))
 }
 pub fn mirror_name_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("mirror.name"))
@@ -104,6 +109,21 @@ pub fn mirror_name() -> Result<String> {
     let n = random_name();
     write_atomic(&p, &format!("{n}\n"))?;
     Ok(n)
+}
+
+/// Whether the stage was last told to run as a mirror.
+pub fn load_mirror_mode() -> Result<bool> {
+    Ok(read_if_exists(&mirror_mode_path()?)?.is_some())
+}
+
+/// Remember (`true`) or forget (`false`) mirror mode for plain starts.
+pub fn save_mirror_mode(on: bool) -> Result<()> {
+    let p = mirror_mode_path()?;
+    if on {
+        write_atomic(&p, "mirror\n")
+    } else {
+        remove(&p)
+    }
 }
 
 pub fn random_name() -> String {

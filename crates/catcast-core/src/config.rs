@@ -13,6 +13,8 @@ pub enum ConfigError {
     InvalidDuration(String, humantime::DurationError),
     #[error("invalid cron expression {0:?}: {1}")]
     InvalidCron(String, cron::error::Error),
+    #[error("invalid URL {0:?}: {1}")]
+    InvalidUrl(String, url::ParseError),
     #[error("yaml parse error: {0}")]
     Yaml(#[from] serde_yaml::Error),
 }
@@ -111,6 +113,10 @@ impl Config {
         let default = parse_duration(&self.rotation.default_duration)?;
         for entry in &self.rotation.urls {
             entry.duration(default)?; // surface bad per-URL durations
+            check_url(entry.url())?;
+        }
+        for e in &self.fixed {
+            check_url(&e.url)?;
         }
         let mut intervals: Vec<(
             usize,
@@ -149,6 +155,15 @@ impl Config {
     }
 }
 
+/// An absolute URL the webview can open. Only checks that it parses: the
+/// string itself is what travels and is stored, unchanged, so `?`, `&`,
+/// `#`, `%xx` and non-ASCII characters arrive exactly as written.
+pub fn check_url(s: &str) -> Result<(), ConfigError> {
+    url::Url::parse(s)
+        .map(|_| ())
+        .map_err(|e| ConfigError::InvalidUrl(s.to_string(), e))
+}
+
 pub fn parse_duration(s: &str) -> Result<Duration, ConfigError> {
     humantime::parse_duration(s).map_err(|e| ConfigError::InvalidDuration(s.to_string(), e))
 }
@@ -173,6 +188,52 @@ pub fn parse_cron(expr: &str) -> Result<cron::Schedule, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// URLs that carry the characters people trip over.
+    pub(crate) const TRICKY: &[&str] = &[
+        "https://x.example/menu.html#geek,flags",
+        "https://x.example/a?b=1&c=2#x",
+        "https://x.example/p%20q?x=%2F&y=a+b#f",
+        "https://x.example/a?q=a:b&r=[1]&s=@~!$'()*;",
+        "https://x.example/ümlaut?ä=ö#ß",
+        "https://x.example/app#!/route?x=1&y=2",
+        "https://catproxy.example/https://x.example/a?b=1#c,d",
+    ];
+
+    #[test]
+    fn block_yaml_keeps_tricky_urls_verbatim() {
+        let mut yaml = String::from("version: 1\nrotation:\n  urls:\n");
+        for u in TRICKY {
+            yaml.push_str(&format!("    - {u}\n"));
+            yaml.push_str(&format!("    - url: {u}\n      duration: 5s\n"));
+        }
+        let cfg = Config::from_yaml(&yaml).unwrap();
+        cfg.validate().unwrap();
+        let got: Vec<&str> = cfg.rotation.urls.iter().map(|e| e.url()).collect();
+        let want: Vec<&str> = TRICKY.iter().flat_map(|u| [*u, *u]).collect();
+        assert_eq!(got, want);
+        // And back out through `config export`.
+        let again = Config::from_yaml(&cfg.to_yaml()).unwrap();
+        assert_eq!(again, cfg);
+    }
+
+    #[test]
+    fn flow_yaml_needs_quotes_around_commas() {
+        let quoted = "version: 1\nrotation:\n  urls: [\"https://x.example/#geek,flags\"]\n";
+        let cfg = Config::from_yaml(quoted).unwrap();
+        assert_eq!(cfg.rotation.urls[0].url(), "https://x.example/#geek,flags");
+        // Unquoted, the comma splits the entry: documented in README.
+        let bare = "version: 1\nrotation:\n  urls: [https://x.example/#geek,flags]\n";
+        let cfg = Config::from_yaml(bare).unwrap();
+        assert_eq!(cfg.rotation.urls.len(), 2);
+    }
+
+    #[test]
+    fn a_url_that_does_not_parse_is_refused() {
+        let yaml = "version: 1\nrotation:\n  urls:\n    - not a url\n";
+        let err = Config::from_yaml(yaml).unwrap().validate().unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidUrl(..)), "{err}");
+    }
 
     #[test]
     fn parses_short_and_long_rotation_entries() {

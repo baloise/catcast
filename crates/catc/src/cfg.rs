@@ -54,6 +54,11 @@ pub struct Stage {
     pub name: String,
     #[serde(default = "true_default")]
     pub active: bool,
+    /// A mirror stage (`catstage --mirror`). Commands sent to all active
+    /// stages skip it; `stage update` and `status` still include it. Set by
+    /// `relay pair`, and by `status` when the stage reports itself a mirror.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mirror: bool,
 }
 
 fn true_default() -> bool {
@@ -126,14 +131,6 @@ impl CatcConfig {
 
     pub fn stage(&self, name: &str) -> Option<&Stage> {
         self.stages.iter().find(|s| s.name == name)
-    }
-
-    pub fn active_names(&self) -> Vec<String> {
-        self.stages
-            .iter()
-            .filter(|s| s.active)
-            .map(|s| s.name.clone())
-            .collect()
     }
 }
 

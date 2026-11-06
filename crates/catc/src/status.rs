@@ -90,6 +90,17 @@ pub async fn cmd_status() -> Result<()> {
         }
     }
 
+    // Learn roles: a registered stage that says it is a mirror gets marked,
+    // so commands for all active stages stop reaching it.
+    for s in &cfg.stages {
+        let is_mirror = matches!(replies.get(&s.name), Some(Some(st)) if st.mirror);
+        if is_mirror && !s.mirror {
+            if let Err(e) = crate::cli::mark_mirror(&s.name) {
+                eprintln!("catc: could not mark {} as a mirror: {e:#}", s.name);
+            }
+        }
+    }
+
     let stages: Vec<(String, bool)> = cfg
         .stages
         .iter()
@@ -118,12 +129,34 @@ async fn probe(br: &mut Broker, names: &[String]) -> Result<Replies> {
     br.collect_until(&keys, PROBE_WAIT, |name, pt| {
         let slot = out.entry(name.to_string()).or_default();
         if let Message::State(s) = pt.msg {
-            *slot = Some(s);
+            keep_newest(slot, s);
         }
         out.values().filter(|v| v.is_some()).count() == want
     })
     .await;
     Ok(out)
+}
+
+/// Right after an update the old process can still answer next to the new
+/// one. Keep the State of the newer process: the later start time when both
+/// report one, else the one that does (only newer builds do), else the
+/// higher version.
+pub fn keep_newest(slot: &mut Option<State>, s: State) {
+    let replace = match slot.as_ref() {
+        None => true,
+        Some(old) => match (old.started_ts, s.started_ts) {
+            (Some(a), Some(b)) => b > a,
+            (None, Some(_)) => true,
+            (Some(_), None) => false,
+            (None, None) => {
+                let v = |st: &State| semver::Version::parse(&st.version).ok();
+                v(&s) > v(old)
+            }
+        },
+    };
+    if replace {
+        *slot = Some(s);
+    }
 }
 
 /// Mirror names the responding relays point at, deduplicated, in order.
@@ -409,6 +442,30 @@ mod tests {
 
     fn v(s: &str) -> Version {
         Version::parse(s).unwrap()
+    }
+
+    #[test]
+    fn newest_process_wins_over_the_one_being_replaced() {
+        let mut old = State::fresh("k", "0.4.0");
+        old.started_ts = None;
+        let mut new = State::fresh("k", "0.6.0");
+        new.started_ts = Some(NOW);
+        // Either arrival order ends on the new process.
+        let mut slot = None;
+        keep_newest(&mut slot, new.clone());
+        keep_newest(&mut slot, old.clone());
+        assert_eq!(slot.as_ref().unwrap().version, "0.6.0");
+        let mut slot = None;
+        keep_newest(&mut slot, old.clone());
+        keep_newest(&mut slot, new.clone());
+        assert_eq!(slot.as_ref().unwrap().version, "0.6.0");
+        // Both pre-health builds: the higher version.
+        let mut slot = None;
+        let mut newer = State::fresh("k", "0.5.0");
+        newer.started_ts = None;
+        keep_newest(&mut slot, newer);
+        keep_newest(&mut slot, old);
+        assert_eq!(slot.unwrap().version, "0.5.0");
     }
 
     #[test]

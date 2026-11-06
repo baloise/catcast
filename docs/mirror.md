@@ -9,9 +9,12 @@ relay. For static pages that change every few minutes; not for video or
 animation.
 
 ```bash
-# Outside: start a mirror. It picks a random 20-character name and shows
-# it on its about page (F1) as text and QR code.
-catstage.exe --install-autostart --socks wss://.../r/<room>-relay --mirror
+# Outside: install and start a mirror. It picks a random 20-character name,
+# prints it, and shows it on its about page (F1) as text and QR code. The
+# name is also in ~/.config/catcast/mirror.name (%APPDATA%\catcast on
+# Windows). --mirror is remembered: a plain `catstage` stays a mirror until
+# `--no-mirror`.
+catstage.exe --install-autostart --start --socks wss://.../r/<room>-relay --mirror
 
 # Laptop: register both stages, then pair them.
 catc stage add lobby-relay
@@ -22,6 +25,11 @@ catc relay cache --mirror <mirror-name> 256MB   # tile cache size, default 64MB
 catc relay off --relay lobby-relay --mirror <mirror-name>
 ```
 
+- **Mirrors are left out of "all stages".** `relay pair` marks the mirror
+  in `catc.toml` (`catc status` does too when it finds one), and commands
+  without `--name` (nav, pause, config import and export) skip it: a mirror
+  shows its relay's screen. `catc stage update` still includes it, so one
+  command updates relay and mirror. A mirror refuses nav and config itself.
 - **The relay must be a visible screen.** It captures what its window
   shows; Windows stops painting a minimised or hidden WebView2. A real
   kiosk or a second monitor, not a minimised helper.

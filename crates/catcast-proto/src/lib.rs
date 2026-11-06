@@ -500,6 +500,36 @@ mod tests {
     }
 
     #[test]
+    fn urls_cross_the_wire_byte_for_byte() {
+        let key = Key::from_psk("kiosk").unwrap();
+        for url in [
+            "https://x.example/menu.html#geek,flags",
+            "https://x.example/p%20q?x=%2F&y=a+b#f",
+            "https://x.example/a?q=a:b&r=[1]&s=@~!$'()*;\"<>\\",
+            "https://x.example/ümlaut?ä=ö#ß 🐱",
+            "https://catproxy.example/https://x.example/a?b=1#c,d",
+        ] {
+            for msg in [
+                Message::Nav { url: url.into() },
+                Message::NavTimed {
+                    url: url.into(),
+                    duration_secs: 120,
+                },
+            ] {
+                let env = encrypt(&key, "kiosk", &msg).unwrap();
+                let back = decrypt(&key, &env).unwrap().msg;
+                match (msg, back) {
+                    (Message::Nav { url: a }, Message::Nav { url: b })
+                    | (Message::NavTimed { url: a, .. }, Message::NavTimed { url: b, .. }) => {
+                        assert_eq!(a, b)
+                    }
+                    (a, b) => panic!("{a:?} came back as {b:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
     fn relay_messages_round_trip() {
         let key = Key::from_frame_secret(&[1u8; 32]);
         let msgs = [

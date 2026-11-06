@@ -145,10 +145,12 @@ pub struct StageList {
 #[derive(Args, Clone)]
 pub struct Targets {
     /// Target stage by name (repeatable). If neither this nor `--all` is
-    /// given, the command goes to every active stage.
+    /// given, the command goes to every active stage except mirrors
+    /// (`stage update` includes them).
     #[arg(long = "name")]
     pub names: Vec<String>,
-    /// Target every registered stage, regardless of active flag.
+    /// Target every registered stage, regardless of active flag (mirrors
+    /// only for `stage update`).
     #[arg(long)]
     pub all: bool,
 }
@@ -355,21 +357,19 @@ pub async fn run(cli: Cli) -> Result<()> {
             url,
             r#for,
             targets,
-        } => match r#for {
-            Some(d) => {
-                let dur = humantime::parse_duration(&d)
-                    .with_context(|| format!("parse duration {d:?}"))?;
-                cmd_send(
-                    targets,
-                    Message::NavTimed {
-                        url,
-                        duration_secs: dur.as_secs(),
-                    },
-                )
-                .await
-            }
-            None => cmd_send(targets, Message::Nav { url }).await,
-        },
+        } => {
+            catcast_core::config::check_url(&url)?;
+            let msg = match r#for {
+                Some(d) => Message::NavTimed {
+                    url,
+                    duration_secs: humantime::parse_duration(&d)
+                        .with_context(|| format!("parse duration {d:?}"))?
+                        .as_secs(),
+                },
+                None => Message::Nav { url },
+            };
+            cmd_send(targets, msg).await
+        }
         Cmd::Config { sub } => match sub {
             ConfigCmd::Import { file, targets } => cmd_config_import(file, targets).await,
             ConfigCmd::Export { targets } => {
@@ -472,7 +472,11 @@ fn cmd_add_stage(name: String) -> Result<()> {
     if cfg.stages.iter().any(|s| s.name == name) {
         bail!("stage {name:?} already registered");
     }
-    cfg.stages.push(Stage { name, active: true });
+    cfg.stages.push(Stage {
+        name,
+        active: true,
+        mirror: false,
+    });
     cfg.save()?;
     Ok(())
 }
@@ -507,9 +511,25 @@ fn cmd_set_active(s: StageList, active: bool) -> Result<()> {
     Ok(())
 }
 
+/// Targets for a command. Without `--name`, mirrors are left out: they show
+/// their relay's screen, so rotation commands and exports are for the relay.
 fn resolve_targets(cfg: &CatcConfig, t: &Targets) -> Result<Vec<String>> {
+    resolve_targets_scoped(cfg, t, false)
+}
+
+fn resolve_targets_scoped(
+    cfg: &CatcConfig,
+    t: &Targets,
+    with_mirrors: bool,
+) -> Result<Vec<String>> {
+    let pick = |s: &&Stage| with_mirrors || !s.mirror;
     if t.all {
-        Ok(cfg.stages.iter().map(|s| s.name.clone()).collect())
+        Ok(cfg
+            .stages
+            .iter()
+            .filter(pick)
+            .map(|s| s.name.clone())
+            .collect())
     } else if !t.names.is_empty() {
         for n in &t.names {
             if cfg.stage(n).is_none() {
@@ -518,8 +538,17 @@ fn resolve_targets(cfg: &CatcConfig, t: &Targets) -> Result<Vec<String>> {
         }
         Ok(t.names.clone())
     } else {
-        let active = cfg.active_names();
+        let active: Vec<String> = cfg
+            .stages
+            .iter()
+            .filter(|s| s.active)
+            .filter(pick)
+            .map(|s| s.name.clone())
+            .collect();
         if active.is_empty() {
+            if cfg.stages.iter().any(|s| s.active && s.mirror) {
+                bail!("only mirror stages are active — pass --name to address one");
+            }
             bail!("no active stages — register some with `catc stage add` or pass --name/--all");
         }
         Ok(active)
@@ -895,11 +924,28 @@ async fn cmd_relay_pair(
         ),
     ])
     .await?;
+    mark_mirror(&mirror)?;
     println!(
         "paired: {relay} → {mirror}. Watch it with `catc status`. \
          Frames reach every stage in the broker room; a room of their own keeps them apart."
     );
     Ok(())
+}
+
+/// Record in `catc.toml` that `name` is a mirror, registering it if needed,
+/// so commands for all active stages leave it alone.
+pub(crate) fn mark_mirror(name: &str) -> Result<()> {
+    let mut cfg = CatcConfig::load()?;
+    match cfg.stage_mut(name) {
+        Some(s) if s.mirror => return Ok(()),
+        Some(s) => s.mirror = true,
+        None => cfg.stages.push(Stage {
+            name: name.to_string(),
+            active: true,
+            mirror: true,
+        }),
+    }
+    cfg.save()
 }
 
 async fn cmd_relay_off(relay: String, mirror: Option<String>) -> Result<()> {
@@ -975,7 +1021,12 @@ async fn cmd_targets_list(probe: bool) -> Result<()> {
     }
     if !probe {
         for s in &cfg.stages {
-            println!("{}\t{}", if s.active { "active" } else { "off   " }, s.name);
+            let role = if s.mirror { "\tmirror" } else { "" };
+            println!(
+                "{}\t{}{role}",
+                if s.active { "active" } else { "off   " },
+                s.name
+            );
         }
         return Ok(());
     }
@@ -1000,7 +1051,7 @@ async fn cmd_targets_list(probe: bool) -> Result<()> {
     for (name, pt) in replies {
         let slot = seen.entry(name).or_default();
         if let Message::State(s) = pt.msg {
-            *slot = Some(s);
+            crate::status::keep_newest(slot, s);
         }
     }
 
@@ -1045,7 +1096,7 @@ async fn cmd_stage_update(o: UpdateOpts) -> Result<()> {
     use semver::Version;
 
     let cfg = CatcConfig::load()?;
-    let names = resolve_targets(&cfg, &o.targets)?;
+    let names = resolve_targets_scoped(&cfg, &o.targets, true)?;
     let keys = keys_for(&names)?;
 
     let target: Version = match &o.version {
@@ -1634,7 +1685,7 @@ fn cmd_alias_add(name: String, command: Vec<String>) -> Result<()> {
         bail!("alias needs a command");
     }
     let mut a = Aliases::load()?;
-    a.0.insert(name, command.join(" "));
+    a.0.insert(name, shell_join(&command));
     a.save()
 }
 
@@ -1673,6 +1724,26 @@ fn cmd_alias_export(file: String) -> Result<()> {
     Ok(())
 }
 
+/// Inverse of [`shell_split`]: arguments with spaces, quotes or
+/// backslashes are single-quoted (a `'` inside becomes `'\''`), so a URL
+/// stored by `alias add` comes back from `alias run` unchanged.
+fn shell_join(args: &[String]) -> String {
+    args.iter()
+        .map(|a| {
+            let plain = !a.is_empty()
+                && !a
+                    .chars()
+                    .any(|c| c.is_whitespace() || matches!(c, '\'' | '"' | '\\'));
+            if plain {
+                a.clone()
+            } else {
+                format!("'{}'", a.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Tiny shell-style splitter: handles double quotes, single quotes,
 /// backslash escapes outside quotes. Sufficient for alias bodies.
 fn shell_split(s: &str) -> Vec<String> {
@@ -1709,6 +1780,89 @@ fn shell_split(s: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn registry(stages: &[(&str, bool, bool)]) -> CatcConfig {
+        CatcConfig {
+            stages: stages
+                .iter()
+                .map(|(n, active, mirror)| Stage {
+                    name: n.to_string(),
+                    active: *active,
+                    mirror: *mirror,
+                })
+                .collect(),
+            ..CatcConfig::default()
+        }
+    }
+
+    fn targets(names: &[&str], all: bool) -> Targets {
+        Targets {
+            names: names.iter().map(|n| n.to_string()).collect(),
+            all,
+        }
+    }
+
+    #[test]
+    fn aliases_keep_urls_with_special_characters() {
+        for url in [
+            "https://x.example/menu.html#geek,flags",
+            "https://x.example/a?b=1&c=2#x",
+            "https://x.example/p%20q?x=%2F&y=a+b",
+            "https://x.example/a?q=it's&r=\"quoted\"&s=back\\slash",
+            "https://x.example/a?q=two words",
+            "https://x.example/ümlaut?ä=ö#ß",
+        ] {
+            let argv: Vec<String> = ["nav", url, "--for", "2m", "--name", "CH-WD-K000ljay7"]
+                .map(String::from)
+                .to_vec();
+            assert_eq!(shell_split(&shell_join(&argv)), argv, "{url}");
+        }
+        // Plain words stay readable in aliases.yaml.
+        let argv = ["nav", "https://x.example/a?b=1#c"].map(String::from);
+        assert_eq!(shell_join(&argv), "nav https://x.example/a?b=1#c");
+    }
+
+    #[test]
+    fn default_targets_skip_mirrors_but_updates_reach_them() {
+        let cfg = registry(&[
+            ("kiosk", true, false),
+            ("m1rror", true, true),
+            ("tv", false, false),
+        ]);
+        assert_eq!(
+            resolve_targets(&cfg, &targets(&[], false)).unwrap(),
+            ["kiosk"]
+        );
+        assert_eq!(
+            resolve_targets(&cfg, &targets(&[], true)).unwrap(),
+            ["kiosk", "tv"]
+        );
+        assert_eq!(
+            resolve_targets_scoped(&cfg, &targets(&[], false), true).unwrap(),
+            ["kiosk", "m1rror"]
+        );
+        // Named explicitly, a mirror is addressed like any stage.
+        assert_eq!(
+            resolve_targets(&cfg, &targets(&["m1rror"], false)).unwrap(),
+            ["m1rror"]
+        );
+    }
+
+    #[test]
+    fn only_mirrors_active_says_so() {
+        let cfg = registry(&[("m1rror", true, true)]);
+        let e = resolve_targets(&cfg, &targets(&[], false)).unwrap_err();
+        assert!(e.to_string().contains("only mirror stages"), "{e}");
+    }
+
+    #[test]
+    fn registry_without_mirror_key_still_parses() {
+        let cfg: CatcConfig =
+            toml::from_str("socks = \"wss://x/r/y\"\n[[stages]]\nname = \"kiosk\"\n").unwrap();
+        assert!(!cfg.stages[0].mirror);
+        let out = toml::to_string(&cfg).unwrap();
+        assert!(!out.contains("mirror"), "plain stages stay unmarked: {out}");
+    }
 
     #[test]
     fn short_mirror_names_need_an_explicit_opt_in() {
