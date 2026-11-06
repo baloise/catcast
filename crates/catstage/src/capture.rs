@@ -29,6 +29,8 @@ enum Raw {
 
 type Reply = Arc<Mutex<Option<oneshot::Sender<Result<Raw>>>>>;
 
+// Unused where capture is not implemented (macOS).
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 fn answer(reply: &Reply, r: Result<Raw>) {
     if let Some(tx) = reply.lock().expect("capture reply poisoned").take() {
         let _ = tx.send(r);
