@@ -3,6 +3,9 @@ name: ci
 on:
   push:
     branches: [main]
+    # Docs-only pushes skip the build matrix. Not on pull_request: a
+    # required check that never starts would block the PR.
+    paths-ignore: ["**.md", "docs/**", "LICENSE", "*.svg"]
   pull_request:
 
 jobs:
