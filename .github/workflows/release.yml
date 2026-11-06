@@ -43,13 +43,18 @@ jobs:
             build-essential \
             file
       - name: Build binaries
+        if: matrix.os != 'windows-latest'
         run: cargo build --release -p catstage -p catc
-      - name: Install Tauri CLI (Windows)
+      # Windows: one LTO build of catstage, not two. `tauri build` compiles
+      # catstage with its own flags anyway, so a separate `cargo build` of it
+      # was thrown away; the exe asset is now the same binary the MSI ships.
+      # The CLI comes prebuilt from npm (was `cargo install tauri-cli`, ~7 min).
+      - name: Build binaries + MSI (Windows)
         if: matrix.os == 'windows-latest'
-        run: cargo install tauri-cli --version "^2"
-      - name: Build MSI (Windows)
-        if: matrix.os == 'windows-latest'
-        run: cargo tauri build --bundles msi
+        shell: bash
+        run: |
+          cargo build --release -p catc
+          npx --yes @tauri-apps/cli@2.11.1 build --bundles msi
       - name: Stage artifacts
         shell: bash
         run: |
