@@ -10,6 +10,7 @@ mod cli;
 mod default_logic;
 mod net;
 mod release;
+mod status;
 
 use anyhow::Result;
 use clap::Parser;

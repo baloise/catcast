@@ -603,6 +603,11 @@ async fn bootstrap(
             single_url_plan(url.clone())
         }
     };
+    shared
+        .lock()
+        .unwrap()
+        .state
+        .reset_live(chrono::Utc::now().timestamp_millis());
 
     let events = Arc::new(SchedEvents {
         app: app.clone(),
@@ -721,7 +726,24 @@ async fn bootstrap(
         Arc::clone(&socks_abort),
         {
             let app = app.clone();
+            let shared = Arc::clone(&shared);
             Arc::new(move |up| {
+                {
+                    let mut sh = shared.lock().unwrap();
+                    let st = &mut sh.state;
+                    match (up, st.connected_ts) {
+                        (true, _) => {
+                            st.connected_ts = Some(chrono::Utc::now().timestamp_millis());
+                        }
+                        // A drop after a live connection; the reconnect
+                        // that follows is counted here, once.
+                        (false, Some(_)) => {
+                            st.connected_ts = None;
+                            st.reconnects += 1;
+                        }
+                        (false, None) => {}
+                    }
+                }
                 if up {
                     if let Some(m) = &connect_mirror {
                         let _ = m.try_send(mirror::Cmd::Connected);
@@ -784,7 +806,7 @@ fn route_frame(
         }
         m @ (Message::Frame { .. } | Message::FrameTiles { .. } | Message::FrameEnd { .. }) => {
             if let Some(tx) = mirror {
-                if tx.try_send(mirror::Cmd::Msg(m)).is_err() {
+                if tx.try_send(mirror::Cmd::Msg(Box::new(m))).is_err() {
                     eprintln!("mirror: inbound queue full, frame message dropped");
                 }
             }

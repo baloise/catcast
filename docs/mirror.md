@@ -17,7 +17,7 @@ catstage.exe --install-autostart --socks wss://.../r/<room>-relay --mirror
 catc stage add lobby-relay
 catc stage add <mirror-name-from-the-qr>
 catc relay pair --relay lobby-relay --mirror <mirror-name> [--settle 3s] [--every 60s]
-catc stage list --probe     # relay→<mirror> frame 12s / mirror frame 12s
+catc status                 # the mirror shows under its relay: frame age, cache
 catc relay cache --mirror <mirror-name> 256MB   # tile cache size, default 64MB
 catc relay off --relay lobby-relay --mirror <mirror-name>
 ```

@@ -55,6 +55,23 @@ pub struct State {
     /// frame it received and confirmed (an unchanged page still confirms).
     #[serde(default)]
     pub last_frame_ts: Option<i64>,
+    /// Live health, additive like `platform`; never meaningful from disk.
+    /// Unix-ms the stage process started.
+    #[serde(default)]
+    pub started_ts: Option<i64>,
+    /// Unix-ms the current broker connection came up.
+    #[serde(default)]
+    pub connected_ts: Option<i64>,
+    /// Broker reconnects since the process started (the first connect does
+    /// not count).
+    #[serde(default)]
+    pub reconnects: u32,
+    /// Mirror: bytes in the tile cache.
+    #[serde(default)]
+    pub cache_bytes: Option<u64>,
+    /// Mirror: the tile cache cap in bytes.
+    #[serde(default)]
+    pub cache_cap: Option<u64>,
 }
 
 impl State {
@@ -81,7 +98,23 @@ impl State {
             relay_to: None,
             mirror: false,
             last_frame_ts: None,
+            started_ts: None,
+            connected_ts: None,
+            reconnects: 0,
+            cache_bytes: None,
+            cache_cap: None,
         }
+    }
+
+    /// Clear the live health fields, e.g. after loading `state.json`, and
+    /// stamp the process start.
+    pub fn reset_live(&mut self, now_ms: i64) {
+        self.actual_url = None;
+        self.started_ts = Some(now_ms);
+        self.connected_ts = None;
+        self.reconnects = 0;
+        self.cache_bytes = None;
+        self.cache_cap = None;
     }
 }
 

@@ -29,6 +29,11 @@ pub enum Cmd {
         #[command(subcommand)]
         sub: StageCmd,
     },
+    /// Broker, stages and their mirrors in one table: up/down, last seen,
+    /// version, uptime, broker link, frame age, mirror cache, where each
+    /// kiosk is. Probes every registered stage and every mirror a relay
+    /// names.
+    Status,
 
     /// Freeze rotation on the current URL.
     Pause(Targets),
@@ -449,6 +454,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
         },
         Cmd::Version => cmd_version().await,
+        Cmd::Status => crate::status::cmd_status().await,
         Cmd::SelfUpdate { version, force } => cmd_self_update(version, force).await,
     }
 }
@@ -890,7 +896,7 @@ async fn cmd_relay_pair(
     ])
     .await?;
     println!(
-        "paired: {relay} → {mirror}. Watch it with `catc stage list --probe`. \
+        "paired: {relay} → {mirror}. Watch it with `catc status`. \
          Frames reach every stage in the broker room; a room of their own keeps them apart."
     );
     Ok(())

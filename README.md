@@ -51,6 +51,7 @@ catc init --socks wss://.../r/<room>
 catc stage add kitchen        # the name shows on the stage's catcast://about page
 catc config import config.yaml --name kitchen
 catc nav https://example.com --for 5m
+catc status                   # broker, stages, mirrors: up/down, last seen, uptime
 ```
 
 See `examples/` for `config.yaml`, `aliases.yaml`, and a default Rhai logic.

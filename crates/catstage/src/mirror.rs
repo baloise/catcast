@@ -101,7 +101,7 @@ pub struct MirrorView {
 }
 
 pub enum Cmd {
-    Msg(Message),
+    Msg(Box<Message>),
     /// The broker link came up: ask the relay for its current frame.
     Connected,
     Configure(Option<MirrorCfg>),
@@ -161,9 +161,10 @@ impl Mirror {
         if let Err(e) = self.restore().await {
             eprintln!("mirror: no previous frame to show: {e:#}");
         }
+        self.evict_now().await;
         while let Some(cmd) = rx.recv().await {
             let res = match cmd {
-                Cmd::Msg(m) => self.on_message(m).await,
+                Cmd::Msg(m) => self.on_message(*m).await,
                 Cmd::Connected => self.pull().await,
                 Cmd::Configure(c) => {
                     self.configure(c, true).await;
@@ -171,11 +172,7 @@ impl Mirror {
                 }
                 Cmd::SetCap(cap, reply) => {
                     self.cap = cap;
-                    let store = self.store.clone();
-                    let keep: HashSet<Hash> = self.shown.iter().flatten().copied().collect();
-                    let used = tokio::task::spawn_blocking(move || evict(&store, cap, &keep))
-                        .await
-                        .unwrap_or(0);
+                    let used = self.evict_now().await;
                     eprintln!(
                         "mirror: tile cache cap {} MB, {} MB used",
                         cap >> 20,
@@ -307,10 +304,7 @@ impl Mirror {
         {
             eprintln!("mirror: could not persist frame.json: {e:#}");
         }
-        let store = self.store.clone();
-        let keep: HashSet<Hash> = hashes.into_iter().collect();
-        let cap = self.cap;
-        tokio::task::spawn_blocking(move || evict(&store, cap, &keep));
+        self.evict_now().await;
 
         let snap = {
             let mut sh = self.shared.lock().unwrap();
@@ -342,6 +336,21 @@ impl Mirror {
         self.shared.lock().unwrap().state.last_frame_ts = Some(rec.confirmed_ts);
         eprintln!("mirror: restored the last frame of {}", rec.source_url);
         Ok(())
+    }
+
+    /// Trim the tile store to the cap, sparing the frame on screen, and
+    /// report the bytes in use (also to `State` for `catc status`).
+    async fn evict_now(&self) -> u64 {
+        let store = self.store.clone();
+        let keep: HashSet<Hash> = self.shown.iter().flatten().copied().collect();
+        let cap = self.cap;
+        let used = tokio::task::spawn_blocking(move || evict(&store, cap, &keep))
+            .await
+            .unwrap_or(0);
+        let mut sh = self.shared.lock().unwrap();
+        sh.state.cache_bytes = Some(used);
+        sh.state.cache_cap = Some(cap);
+        used
     }
 
     async fn send(&self, msg: Message) -> Result<()> {
