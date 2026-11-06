@@ -33,6 +33,8 @@ pub struct AutostartArgs {
     pub name: Option<String>,
     /// Optional `--screen <N>` monitor selection (1-based).
     pub screen: Option<u32>,
+    /// `--mirror`: the stage shows a relay's frames instead of rotating.
+    pub mirror: bool,
 }
 
 /// Install (or replace) the Startup-folder shortcut. Returns the path to the
@@ -53,6 +55,9 @@ pub fn install(args: &AutostartArgs) -> Result<Option<PathBuf>> {
     }
     if let Some(screen) = args.screen {
         args_str.push_str(&format!(" --screen {screen}"));
+    }
+    if args.mirror {
+        args_str.push_str(" --mirror");
     }
 
     let mut sl = ShellLink::new(target)?;
@@ -77,6 +82,9 @@ pub fn install(args: &AutostartArgs) -> Result<Option<PathBuf>> {
     }
     if let Some(screen) = args.screen {
         exec.push_str(&format!(" --screen {screen}"));
+    }
+    if args.mirror {
+        exec.push_str(" --mirror");
     }
     let path = dir.join("catstage.desktop");
     let body = format!(
@@ -110,6 +118,9 @@ pub fn install(args: &AutostartArgs) -> Result<Option<PathBuf>> {
     if let Some(screen) = args.screen {
         program_args.push_str("        <string>--screen</string>\n");
         program_args.push_str(&format!("        <string>{screen}</string>\n"));
+    }
+    if args.mirror {
+        program_args.push_str("        <string>--mirror</string>\n");
     }
 
     let body = format!(
@@ -312,6 +323,7 @@ mod tests {
             socks: "wss://x/r/y".into(),
             name: Some("kitchen".into()),
             screen: Some(2),
+            mirror: false,
         };
         assert!(a.socks.starts_with("wss://"));
         assert_eq!(a.name.as_deref(), Some("kitchen"));
@@ -342,6 +354,7 @@ mod tests {
             socks: "wss://example/r/test".into(),
             name: Some("kitchen".into()),
             screen: Some(2),
+            mirror: false,
         })
         .unwrap()
         .expect("Linux install should return Some(path)");
@@ -379,6 +392,7 @@ mod tests {
             socks: "wss://x".into(),
             name: None,
             screen: None,
+            mirror: false,
         })
         .unwrap();
         assert!(r.is_none());
@@ -406,6 +420,7 @@ mod tests {
             socks: "wss://example/r/test".into(),
             name: Some("kitchen".into()),
             screen: Some(2),
+            mirror: false,
         })
         .unwrap()
         .expect("macOS install should return Some(path)");

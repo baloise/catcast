@@ -32,3 +32,4 @@ sha2 = { workspace = true }
 tokio-tungstenite = { workspace = true }
 rustls = { workspace = true }
 futures-util = { workspace = true }
+rand = { workspace = true }

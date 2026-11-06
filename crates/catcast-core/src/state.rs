@@ -44,6 +44,17 @@ pub struct State {
     pub has_config: bool,
     /// Unix-ms when the stage entered the current state.
     pub since: i64,
+    /// Relay role: the mirror stage this one pushes screenshots to.
+    /// Additive like `platform`.
+    #[serde(default)]
+    pub relay_to: Option<String>,
+    /// Mirror role: this stage shows a relay's frames instead of rotating.
+    #[serde(default)]
+    pub mirror: bool,
+    /// Relay: unix-ms of the last frame it sent. Mirror: unix-ms of the last
+    /// frame it received and confirmed (an unchanged page still confirms).
+    #[serde(default)]
+    pub last_frame_ts: Option<i64>,
 }
 
 impl State {
@@ -67,6 +78,9 @@ impl State {
             has_logic: false,
             has_config: false,
             since: chrono::Utc::now().timestamp_millis(),
+            relay_to: None,
+            mirror: false,
+            last_frame_ts: None,
         }
     }
 }
@@ -144,6 +158,9 @@ mod tests {
         assert_eq!(s.platform, "");
         assert_eq!(s.actual_url, None);
         assert_eq!(s.version, "0.1.1");
+        assert_eq!(s.relay_to, None);
+        assert!(!s.mirror);
+        assert_eq!(s.last_frame_ts, None);
     }
 
     #[test]

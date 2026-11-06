@@ -453,6 +453,7 @@ dependencies = [
  "directories",
  "futures-util",
  "humantime",
+ "rand 0.8.6",
  "reqwest",
  "rustls",
  "semver",
@@ -488,6 +489,7 @@ dependencies = [
  "catcast-proto",
  "ed25519-dalek",
  "futures-util",
+ "png 0.17.16",
  "reqwest",
  "sha2",
  "tokio",
@@ -504,10 +506,12 @@ dependencies = [
  "catcast-core",
  "chacha20poly1305",
  "chrono",
+ "hkdf",
  "rand 0.8.6",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
  "thiserror 2.0.18",
  "zeroize",
 ]
@@ -534,6 +538,7 @@ version = "0.4.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "cairo-rs",
  "catcast-core",
  "catcast-net",
  "catcast-proto",
@@ -543,6 +548,8 @@ dependencies = [
  "futures-util",
  "gethostname",
  "mslnk",
+ "qrcodegen",
+ "rand 0.8.6",
  "reqwest",
  "rhai",
  "rustls",
@@ -555,6 +562,9 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
+ "webkit2gtk",
+ "webview2-com",
+ "windows",
 ]
 
 [[package]]
@@ -1757,6 +1767,24 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
+name = "hkdf"
+version = "0.12.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b5f8eb2ad728638ea2c7d47a21db23b7b58a72ed6a38256b8a1849f15fbbdf7"
+dependencies = [
+ "hmac",
+]
+
+[[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest",
+]
 
 [[package]]
 name = "html5ever"
@@ -3063,6 +3091,12 @@ checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
 ]
+
+[[package]]
+name = "qrcodegen"
+version = "1.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4339fc7a1021c9c1621d87f5e3505f2805c8c105420ba2f2a4df86814590c142"
 
 [[package]]
 name = "quick-xml"

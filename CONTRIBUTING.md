@@ -258,6 +258,25 @@ with the stage re-requesting any chunk dropped on a reconnect via
 assembled bytes before the usual swap/relaunch. Slower than a download,
 but it needs no proxy exception.
 
+### Relay / mirror
+
+`catc relay pair` makes one stage push screenshots to a `--mirror` stage
+(see the README). Capture is platform code: WebView2 `CapturePreview` on
+Windows (`crates/catstage/src/capture.rs`), WebKitGTK snapshots on Linux
+for the dev loop. CI compiles the Windows path but cannot run it, so after
+touching capture, check by hand on a Windows box:
+
+1. Relay fullscreen on a page; `catc stage list --probe` shows
+   `relay→<mirror> frame <age>` and the mirror shows the page.
+2. Relay covered by another window, then minimised: note what the mirror
+   gets (WebView2 stops painting hidden windows; the README tells users the
+   relay must be visible).
+3. A page with a clock: the relay log shows a handful of tiles per capture.
+
+To try the pair on one Linux machine, give each stage its own config dir
+(`XDG_CONFIG_HOME=/tmp/relay` and `/tmp/mirror`) so they don't share
+`state.json` and the tile store.
+
 ### Updating catc itself
 
 `catc self-update [--version vX.Y.Z]` swaps the running CLI in place to a

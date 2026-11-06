@@ -61,7 +61,7 @@ pub struct TauriCtx {
     /// Outbound broker channel (shared with `SchedEvents`); `None` until the
     /// socks task is up and always in offline modes. Lets page-load events
     /// in `main.rs` broadcast `State` when `actual_url` changes.
-    pub out: Arc<Mutex<Option<mpsc::Sender<catcast_proto::Message>>>>,
+    pub out: crate::socks::OutSlot,
     pub stage_name: String,
     pub screen: Option<u32>,
     /// Socks link status for the about-page broker indicator.
@@ -70,6 +70,11 @@ pub struct TauriCtx {
     /// relaunch exactly what the operator (or the Startup shortcut) started.
     /// Rebuilding it from the other fields would lose `--offline`/`--url`.
     pub launch_args: Vec<std::ffi::OsString>,
+    /// Started with `--mirror`.
+    pub mirror: bool,
+    /// Mirror only: the stage name as a QR code (SVG), so the operator can
+    /// scan it instead of typing 20 random characters.
+    pub name_qr_svg: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,6 +122,8 @@ pub struct Snapshot {
     pub stage_name: String,
     pub files: Vec<FileEntry>,
     pub autostart_path: Option<String>,
+    pub mirror: bool,
+    pub name_qr_svg: Option<String>,
 }
 
 pub fn make_snapshot(ctx: &TauriCtx) -> Snapshot {
@@ -134,7 +141,30 @@ pub fn make_snapshot(ctx: &TauriCtx) -> Snapshot {
         stage_name: ctx.stage_name.clone(),
         files: file_entries(),
         autostart_path: crate::autostart::is_installed().map(|p| p.display().to_string()),
+        mirror: ctx.mirror,
+        name_qr_svg: ctx.name_qr_svg.clone(),
     }
+}
+
+/// `text` as a QR code in SVG (black on white, 4-module quiet zone).
+pub fn qr_svg(text: &str) -> Option<String> {
+    use qrcodegen::{QrCode, QrCodeEcc};
+    let qr = QrCode::encode_text(text, QrCodeEcc::Medium).ok()?;
+    let border = 4;
+    let size = qr.size() + 2 * border;
+    let mut d = String::new();
+    for y in 0..qr.size() {
+        for x in 0..qr.size() {
+            if qr.get_module(x, y) {
+                d.push_str(&format!("M{},{}h1v1h-1z", x + border, y + border));
+            }
+        }
+    }
+    Some(format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {size} {size}\" \
+         shape-rendering=\"crispEdges\"><rect width=\"{size}\" height=\"{size}\" \
+         fill=\"#fff\"/><path d=\"{d}\" fill=\"#000\"/></svg>"
+    ))
 }
 
 pub fn set_connection(app: &tauri::AppHandle, status: Connection, label: &str) {
@@ -231,6 +261,26 @@ pub async fn request_exit(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// The mirror's current frame as raw PNG bytes (an `ArrayBuffer` in JS).
+/// Empty when there is none yet.
+#[tauri::command]
+pub async fn get_frame(
+    view: tauri::State<'_, Arc<crate::mirror::MirrorView>>,
+) -> Result<tauri::ipc::Response, String> {
+    let png = view.png.lock().unwrap().clone();
+    Ok(tauri::ipc::Response::new(
+        png.map(|p| p.as_ref().clone()).unwrap_or_default(),
+    ))
+}
+
+/// When the mirror's frame was captured and last confirmed, and from where.
+#[tauri::command]
+pub async fn get_frame_meta(
+    view: tauri::State<'_, Arc<crate::mirror::MirrorView>>,
+) -> Result<Option<crate::mirror::ViewMeta>, String> {
+    Ok(view.meta.lock().unwrap().clone())
+}
+
 /// Push the latest snapshot to the about page (via Tauri event). Called
 /// from `SchedEvents` (and from broker dispatch handlers in `main.rs`)
 /// after state changes.
@@ -245,6 +295,13 @@ pub fn emit_state(app: &tauri::AppHandle, label: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qr_svg_encodes_a_mirror_name() {
+        let svg = qr_svg("abcdefghjkmnpqrstuvw").unwrap();
+        assert!(svg.starts_with("<svg"));
+        assert!(svg.contains("h1v1h-1z"));
+    }
 
     #[test]
     fn file_entries_include_all_four() {

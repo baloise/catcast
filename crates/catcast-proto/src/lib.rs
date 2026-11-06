@@ -12,6 +12,11 @@
 //!
 //! Keys come from a per-stage PSK (the stage name) via Argon2id with a
 //! fixed, documented salt — derive once, cache. AEAD is XChaCha20-Poly1305.
+//!
+//! Relay/mirror frames use a second key, derived with HKDF-SHA256 from a
+//! random 32-byte secret that `catc relay pair` hands to both stages (see
+//! [`Key::from_frame_secret`]). Screen content is never encrypted under a
+//! guessable name.
 
 use base64::Engine;
 use chacha20poly1305::{
@@ -33,6 +38,28 @@ pub const REPLAY_WINDOW_MS: i64 = 60_000;
 /// it would break compatibility with all existing stages. Picked once,
 /// versioned via `PROTO_VERSION` if we ever need to rotate.
 const KDF_SALT: &[u8] = b"catcast-v1-salt!";
+
+/// HKDF `info` for the relay/mirror frame key.
+const FRAME_KEY_INFO: &[u8] = b"catcast-frame-v1";
+
+/// Parse the hex frame secret carried by `SetRelay` / `SetMirror`.
+pub fn parse_frame_secret(hex: &str) -> Result<[u8; 32], ProtoError> {
+    let hex = hex.trim();
+    let bad = || ProtoError::Kdf("frame secret must be 64 hex characters".into());
+    if hex.len() != 64 {
+        return Err(bad());
+    }
+    let mut out = [0u8; 32];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).map_err(|_| bad())?;
+    }
+    Ok(out)
+}
+
+/// Lowercase hex of `bytes`.
+pub fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProtoError {
@@ -86,6 +113,23 @@ pub enum TraceKind {
     Started,
     /// A top-level document finished loading at this URL.
     Loaded,
+}
+
+/// Edge length in pixels of the square tiles a relay cuts its screenshots
+/// into. Part of the protocol: a relay and a mirror must agree, and every
+/// [`Message::Frame`] states it explicitly so a future change is visible.
+pub const TILE: u32 = 128;
+
+/// Bytes of a tile hash (truncated SHA-256 of the tile's pixels).
+pub const TILE_HASH_LEN: usize = 16;
+
+/// One tile in a [`Message::FrameTiles`] batch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TileData {
+    /// Lowercase hex of the [`TILE_HASH_LEN`]-byte tile hash.
+    pub hash: String,
+    /// Base64 PNG of the tile.
+    pub png: String,
 }
 
 /// What the broker sees. Opaque to it.
@@ -217,6 +261,59 @@ pub enum Message {
     /// All chunks sent — assemble, verify and install.
     UpdateStreamEnd,
 
+    // ─── CLI -> stage: relay / mirror pairing ─────────────────────────────
+    /// Make this stage a relay that pushes screenshots of what it shows to
+    /// the mirror stage `to`. `to: None` stops relaying. The secret is the
+    /// hex of 32 random bytes; frames are encrypted with
+    /// [`Key::from_frame_secret`] of it, addressed to the mirror's name.
+    SetRelay {
+        to: Option<String>,
+        #[serde(default)]
+        secret_hex: Option<String>,
+        /// Delay between a finished page load and the capture, so pages
+        /// that fetch their data after `load` have painted.
+        settle_secs: u64,
+        /// Re-capture interval while the relay stays on one page.
+        every_secs: u64,
+    },
+    /// Make this stage a mirror that shows frames from a paired relay.
+    /// `None` forgets the pairing.
+    SetMirror {
+        #[serde(default)]
+        secret_hex: Option<String>,
+    },
+
+    // ─── Relay <-> mirror (frame key only) ───────────────────────────────
+    /// A new screenshot: geometry plus the hash of every tile, row-major.
+    /// The tiles the mirror lacks follow as [`FrameTiles`](Self::FrameTiles)
+    /// (pushed, or pulled with [`FrameNeed`](Self::FrameNeed)); the frame
+    /// is shown once [`FrameEnd`](Self::FrameEnd) arrives and every tile
+    /// is present.
+    Frame {
+        seq: u64,
+        width: u32,
+        height: u32,
+        tile: u32,
+        /// Base64 of the concatenated [`TILE_HASH_LEN`]-byte tile hashes.
+        hashes: String,
+        captured_ts: i64,
+        source_url: String,
+    },
+    FrameTiles {
+        seq: u64,
+        tiles: Vec<TileData>,
+    },
+    FrameEnd {
+        seq: u64,
+    },
+    /// Mirror -> relay: send these tiles (hex hashes) of frame `seq`. An
+    /// empty list asks the relay to repeat its current frame, which a
+    /// mirror does after (re)connecting.
+    FrameNeed {
+        seq: u64,
+        tiles: Vec<String>,
+    },
+
     // ─── Stage -> CLI ────────────────────────────────────────────────────
     /// Snapshot of the stage's current State. Sent unsolicited on connect
     /// and in reply to `GetState`. Doubles as a liveness signal.
@@ -271,6 +368,16 @@ impl Key {
             .hash_password_into(psk.as_bytes(), KDF_SALT, &mut out)
             .map_err(|e| ProtoError::Kdf(e.to_string()))?;
         Ok(Self(out))
+    }
+
+    /// Key for relay/mirror frames: HKDF-SHA256 over a 32-byte random
+    /// secret. No password hardening needed — the input has full entropy.
+    pub fn from_frame_secret(secret: &[u8; 32]) -> Self {
+        let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(KDF_SALT), secret);
+        let mut out = [0u8; 32];
+        hk.expand(FRAME_KEY_INFO, &mut out)
+            .expect("32 bytes is a valid HKDF-SHA256 output length");
+        Self(out)
     }
 
     fn aead(&self) -> XChaCha20Poly1305 {
@@ -361,6 +468,72 @@ mod tests {
         let k2 = Key::from_psk("lobby").unwrap();
         let env = encrypt(&k1, "kitchen", &Message::Pause).unwrap();
         assert!(matches!(decrypt(&k2, &env), Err(ProtoError::Decrypt)));
+    }
+
+    #[test]
+    fn frame_key_is_deterministic_and_not_the_name_key() {
+        let secret = [7u8; 32];
+        let a = Key::from_frame_secret(&secret);
+        let b = Key::from_frame_secret(&secret);
+        let env = encrypt(&a, "mirror", &Message::FrameEnd { seq: 1 }).unwrap();
+        assert!(decrypt(&b, &env).is_ok());
+        let other = Key::from_frame_secret(&[8u8; 32]);
+        assert!(matches!(decrypt(&other, &env), Err(ProtoError::Decrypt)));
+        let by_name = Key::from_psk("mirror").unwrap();
+        assert!(matches!(decrypt(&by_name, &env), Err(ProtoError::Decrypt)));
+    }
+
+    #[test]
+    fn frame_secret_hex_round_trip() {
+        let secret: [u8; 32] = core::array::from_fn(|i| i as u8 * 7);
+        let hex = to_hex(&secret);
+        assert_eq!(hex.len(), 64);
+        assert_eq!(parse_frame_secret(&hex).unwrap(), secret);
+        assert!(parse_frame_secret("abc").is_err());
+        assert!(parse_frame_secret(&"zz".repeat(32)).is_err());
+    }
+
+    #[test]
+    fn relay_messages_round_trip() {
+        let key = Key::from_frame_secret(&[1u8; 32]);
+        let msgs = [
+            Message::Frame {
+                seq: 9,
+                width: 1920,
+                height: 1080,
+                tile: TILE,
+                hashes: "AAAA".into(),
+                captured_ts: 5,
+                source_url: "https://x/".into(),
+            },
+            Message::FrameTiles {
+                seq: 9,
+                tiles: vec![TileData {
+                    hash: "00".repeat(TILE_HASH_LEN),
+                    png: "iVBO".into(),
+                }],
+            },
+            Message::FrameEnd { seq: 9 },
+            Message::FrameNeed {
+                seq: 9,
+                tiles: vec![],
+            },
+            Message::SetRelay {
+                to: Some("m".into()),
+                secret_hex: Some("00".repeat(32)),
+                settle_secs: 3,
+                every_secs: 60,
+            },
+            Message::SetMirror { secret_hex: None },
+        ];
+        for m in msgs {
+            let env = encrypt(&key, "m", &m).unwrap();
+            let back = decrypt(&key, &env).unwrap().msg;
+            assert_eq!(
+                serde_json::to_string(&back).unwrap(),
+                serde_json::to_string(&m).unwrap()
+            );
+        }
     }
 
     #[test]

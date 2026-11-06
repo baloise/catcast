@@ -21,8 +21,11 @@ use tauri::Manager;
 
 mod about;
 mod autostart;
+mod capture;
 mod logic;
+mod mirror;
 mod persist;
+mod relay;
 mod scheduler;
 mod socks;
 mod trace;
@@ -30,8 +33,9 @@ mod update;
 
 use crate::about::TauriCtx;
 use crate::logic::{LogicHandle, Plan};
+use crate::socks::{OutSlot, Outbound, Via};
 
-const WINDOW_LABEL: &str = "stage";
+pub(crate) const WINDOW_LABEL: &str = "stage";
 
 /// The kiosk window. Built in `setup` rather than declared in
 /// `tauri.conf.json` so a navigation hook can be attached (config windows
@@ -81,8 +85,10 @@ fn is_blank_url(url: &tauri::Url) -> bool {
     url.as_str().eq_ignore_ascii_case("about:blank")
 }
 
+/// The bundled about page itself (`/` or `/index.html` of the bundled
+/// origin) — not `mirror.html`, which lives on the same origin.
 fn is_bundled_about_url(url: &tauri::Url) -> bool {
-    if is_blank_url(url) {
+    if is_blank_url(url) || !matches!(url.path(), "" | "/" | "/index.html") {
         return false;
     }
     #[cfg(target_os = "windows")]
@@ -93,6 +99,13 @@ fn is_bundled_about_url(url: &tauri::Url) -> bool {
     {
         url.scheme() == "tauri"
     }
+}
+
+/// The bundled page a mirror stage shows (`ui/mirror.html`).
+fn mirror_page_url() -> tauri::Url {
+    bundled_about_fallback()
+        .join("mirror.html")
+        .expect("valid bundled mirror URL")
 }
 
 /// Build the F1-only escape script for `WebviewWindow::on_page_load`.
@@ -168,6 +181,13 @@ struct Args {
     /// can also be inspected when needed.
     #[arg(long)]
     devtools: bool,
+
+    /// Mirror stage: show the screenshots a paired relay stage pushes
+    /// instead of rotating URLs. Without `--name`, the stage generates a
+    /// random name once (remembered as `mirror.name`) and shows it on its
+    /// about page as text and QR code; pair it with `catc relay pair`.
+    #[arg(long, conflicts_with_all = ["offline", "url"])]
+    mirror: bool,
 }
 
 /// `--socks` wins and is remembered for the next start; without it, the
@@ -205,14 +225,22 @@ fn no_socks_error() -> anyhow::Error {
 /// Offline and SingleUrl skip the broker entirely.
 #[derive(Debug, Clone)]
 enum RunMode {
-    Online { socks: String },
+    Online {
+        socks: String,
+    },
     Offline,
-    SingleUrl { url: String },
+    SingleUrl {
+        url: String,
+    },
+    /// Online, but showing a relay's frames instead of a rotation.
+    Mirror {
+        socks: String,
+    },
 }
 
 impl RunMode {
     fn is_offline(&self) -> bool {
-        !matches!(self, RunMode::Online { .. })
+        !matches!(self, RunMode::Online { .. } | RunMode::Mirror { .. })
     }
 
     /// Human-readable broker_url for the about-page snapshot. Online stages
@@ -220,7 +248,7 @@ impl RunMode {
     /// makes clear there's no live connection.
     fn broker_url_display(&self) -> String {
         match self {
-            RunMode::Online { socks } => socks.clone(),
+            RunMode::Online { socks } | RunMode::Mirror { socks } => socks.clone(),
             RunMode::Offline | RunMode::SingleUrl { .. } => "(offline)".into(),
         }
     }
@@ -259,7 +287,17 @@ fn main() -> Result<()> {
     }
 
     let args = Args::parse();
-    let name = args.name.clone().unwrap_or_else(default_name);
+    let name = match (&args.name, args.mirror) {
+        (Some(n), _) => n.clone(),
+        (None, true) => persist::mirror_name().context("creating the mirror name")?,
+        (None, false) => default_name(),
+    };
+    if args.mirror && name.chars().count() < 16 {
+        eprintln!(
+            "catstage: warning: mirror name {name:?} is short; frames are paired under it — \
+             prefer the generated name (omit --name)"
+        );
+    }
     let screen = args.screen;
     let socks = resolve_socks(&args);
 
@@ -275,6 +313,7 @@ fn main() -> Result<()> {
             socks,
             name: args.name.clone(),
             screen,
+            mirror: args.mirror,
         })? {
             eprintln!("catstage: autostart installed at {}", path.display());
         }
@@ -284,6 +323,7 @@ fn main() -> Result<()> {
     let run_mode = match (args.offline, args.url.clone(), socks) {
         (true, _, _) => RunMode::Offline,
         (false, Some(url), _) => RunMode::SingleUrl { url },
+        (false, None, Some(socks)) if args.mirror => RunMode::Mirror { socks },
         (false, None, Some(socks)) => RunMode::Online { socks },
         (false, None, None) => {
             eprintln!("catstage: {}", no_socks_error());
@@ -313,7 +353,7 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        RunMode::Online { .. } => {}
+        RunMode::Online { .. } | RunMode::Mirror { .. } => {}
     }
 
     eprintln!(
@@ -349,6 +389,11 @@ fn main() -> Result<()> {
                     trace::record(app, TraceKind::Loaded, url.as_str());
                     note_actual_url(app, url.as_str());
                 }
+                if let Some(roles) = app.try_state::<Roles>() {
+                    if let Some(r) = &roles.relay {
+                        let _ = r.try_send(relay::Cmd::PageLoaded);
+                    }
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -357,12 +402,15 @@ fn main() -> Result<()> {
             about::enter_pause,
             about::enter_play,
             about::request_exit,
+            about::get_frame,
+            about::get_frame_meta,
         ])
         .setup(move |app| {
             // Seed with a deterministic about URL so startup never records
             // `about:blank` as the canonical return target.
             app.manage(about::AboutUrl::new(bundled_about_fallback()));
             app.manage(trace::NavTrace::new());
+            app.manage(Arc::new(mirror::MirrorView::default()));
 
             // Every top-level navigation start, redirects included, goes
             // into the trace. Never cancels anything.
@@ -413,9 +461,7 @@ fn main() -> Result<()> {
             }));
             let logic_handle: std::sync::Arc<std::sync::Mutex<Option<LogicHandle>>> =
                 std::sync::Arc::new(std::sync::Mutex::new(None));
-            let out_tx: std::sync::Arc<
-                std::sync::Mutex<Option<tokio::sync::mpsc::Sender<Message>>>,
-            > = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let out_tx: OutSlot = std::sync::Arc::new(std::sync::Mutex::new(None));
             let socks_abort = std::sync::Arc::new(tokio::sync::Notify::new());
 
             app.manage(TauriCtx {
@@ -430,6 +476,10 @@ fn main() -> Result<()> {
                     crate::about::Connection::Unknown as u8,
                 )),
                 launch_args: std::env::args_os().skip(1).collect(),
+                mirror: matches!(setup_run_mode, RunMode::Mirror { .. }),
+                name_qr_svg: matches!(setup_run_mode, RunMode::Mirror { .. })
+                    .then(|| about::qr_svg(&stage_name))
+                    .flatten(),
             });
 
             let handle = app.handle().clone();
@@ -473,7 +523,7 @@ async fn bootstrap(
     mode: RunMode,
     shared: Arc<Mutex<Shared>>,
     logic_handle: Arc<Mutex<Option<LogicHandle>>>,
-    out_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<Message>>>>,
+    out_tx: OutSlot,
     socks_abort: Arc<tokio::sync::Notify>,
     sched_rx: tokio::sync::mpsc::Receiver<scheduler::Cmd>,
 ) -> Result<()> {
@@ -526,6 +576,17 @@ async fn bootstrap(
                 _ => Plan::default(),
             }
         }
+        RunMode::Mirror { .. } => {
+            // One slot, forever: the bundled mirror page. F1 / `catc about`
+            // still park on the about page; `catc play` returns.
+            let url = mirror_page_url().to_string();
+            {
+                let mut sh = shared.lock().unwrap();
+                sh.state.mirror = true;
+                sh.state.current_url = Some(url.clone());
+            }
+            single_url_plan(url)
+        }
         RunMode::SingleUrl { url } => {
             // Synthesize a one-entry rotation with effectively infinite slot
             // duration so the scheduler never advances past the single URL.
@@ -535,20 +596,11 @@ async fn bootstrap(
             // its first `sleep_until` call. Rotation has length 1, so even
             // if the slot ever did expire `(idx + 1) % 1 == 0` keeps us on
             // the same URL.
-            const HUNDRED_YEARS_SECS: u64 = 60 * 60 * 24 * 365 * 100;
             {
                 let mut sh = shared.lock().unwrap();
                 sh.state.current_url = Some(url.clone());
             }
-            Plan {
-                default_secs: 1,
-                rotation: vec![crate::logic::RotationItem {
-                    url: url.clone(),
-                    secs: HUNDRED_YEARS_SECS,
-                }],
-                cron: vec![],
-                one_shot: vec![],
-            }
+            single_url_plan(url.clone())
         }
     };
 
@@ -572,7 +624,7 @@ async fn bootstrap(
     );
 
     let socks_url = match &mode {
-        RunMode::Online { socks } => socks.clone(),
+        RunMode::Online { socks } | RunMode::Mirror { socks } => socks.clone(),
         // Offline and SingleUrl skip the broker entirely. Leaving `out_tx` as
         // `None` makes `broadcast()` a no-op so dispatch-path State emits
         // (none reach us since no inbound socks frames either) are dropped.
@@ -592,6 +644,49 @@ async fn bootstrap(
         .sched_tx
         .clone();
 
+    // Relay or mirror role. Frames arrive on their own ordered channel
+    // (dispatch spawns a task per message, which could reorder a frame's
+    // tiles and its end marker).
+    let frame_slot: socks::FrameSlot = Arc::new(std::sync::RwLock::new(None));
+    let roles = if matches!(mode, RunMode::Mirror { .. }) {
+        let initial = or_absent(
+            "mirror.json",
+            persist::mirror_path().and_then(|p| persist::load_json(&p)),
+        );
+        let view = Arc::clone(app.state::<Arc<mirror::MirrorView>>().inner());
+        Roles {
+            relay: None,
+            mirror: Some(mirror::spawn(
+                app.clone(),
+                Arc::clone(&shared),
+                Arc::clone(&out_tx),
+                Arc::clone(&frame_slot),
+                name.clone(),
+                view,
+                initial,
+            )?),
+        }
+    } else {
+        let initial = or_absent(
+            "relay.json",
+            persist::relay_path().and_then(|p| persist::load_json(&p)),
+        );
+        Roles {
+            relay: Some(relay::spawn(
+                app.clone(),
+                Arc::clone(&shared),
+                Arc::clone(&out_tx),
+                Arc::clone(&frame_slot),
+                initial,
+            )),
+            mirror: None,
+        }
+    };
+    let frame_relay = roles.relay.clone();
+    let frame_mirror = roles.mirror.clone();
+    let connect_mirror = roles.mirror.clone();
+    app.manage(roles);
+
     let handler_shared = Arc::clone(&shared);
     let handler_logic = Arc::clone(&logic_handle);
     let handler_out = Arc::clone(&out_tx);
@@ -600,7 +695,11 @@ async fn bootstrap(
     // received binary lives here between them.
     let stream_state: Arc<Mutex<Option<update::StreamState>>> = Arc::new(Mutex::new(None));
     let handler_stream = Arc::clone(&stream_state);
-    let handler: socks::InboundHandler = Arc::new(move |pt| {
+    let handler: socks::InboundHandler = Arc::new(move |pt, via| {
+        if via == Via::Frame {
+            route_frame(pt.msg, frame_relay.as_ref(), frame_mirror.as_ref());
+            return;
+        }
         let pt_msg = pt.msg.clone();
         let shared = Arc::clone(&handler_shared);
         let sched = sched_tx_for_dispatch.clone();
@@ -617,11 +716,17 @@ async fn bootstrap(
         socks_url,
         name.clone(),
         Arc::clone(&key),
+        frame_slot,
         handler,
         Arc::clone(&socks_abort),
         {
             let app = app.clone();
             Arc::new(move |up| {
+                if up {
+                    if let Some(m) = &connect_mirror {
+                        let _ = m.try_send(mirror::Cmd::Connected);
+                    }
+                }
                 crate::about::set_connection(
                     &app,
                     if up {
@@ -637,9 +742,55 @@ async fn bootstrap(
     *out_tx.lock().unwrap() = Some(outbound.clone());
 
     let snapshot = shared.lock().unwrap().state.clone();
-    let _ = outbound.send(Message::State(snapshot)).await;
+    let _ = outbound.send(Outbound::Own(Message::State(snapshot))).await;
 
     Ok(())
+}
+
+/// A plan with one URL and an effectively infinite slot.
+fn single_url_plan(url: String) -> Plan {
+    // 100 years, not u64::MAX: `Instant + Duration` overflows on absurd
+    // values and the scheduler would panic on its first `sleep_until`.
+    const HUNDRED_YEARS_SECS: u64 = 60 * 60 * 24 * 365 * 100;
+    Plan {
+        default_secs: 1,
+        rotation: vec![crate::logic::RotationItem {
+            url,
+            secs: HUNDRED_YEARS_SECS,
+        }],
+        cron: vec![],
+        one_shot: vec![],
+    }
+}
+
+/// The relay or mirror task of this stage, whichever role it has.
+pub(crate) struct Roles {
+    relay: Option<tokio::sync::mpsc::Sender<relay::Cmd>>,
+    mirror: Option<tokio::sync::mpsc::Sender<mirror::Cmd>>,
+}
+
+/// Hand a frame-key message to the role that handles it; anything else
+/// under the frame key is dropped (it never carries commands).
+fn route_frame(
+    msg: Message,
+    relay: Option<&tokio::sync::mpsc::Sender<relay::Cmd>>,
+    mirror: Option<&tokio::sync::mpsc::Sender<mirror::Cmd>>,
+) {
+    match msg {
+        Message::FrameNeed { seq, tiles } => {
+            if let Some(r) = relay {
+                let _ = r.try_send(relay::Cmd::Need { seq, tiles });
+            }
+        }
+        m @ (Message::Frame { .. } | Message::FrameTiles { .. } | Message::FrameEnd { .. }) => {
+            if let Some(tx) = mirror {
+                if tx.try_send(mirror::Cmd::Msg(m)).is_err() {
+                    eprintln!("mirror: inbound queue full, frame message dropped");
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// A persisted file that fails to load counts as absent; the error is logged.
@@ -700,7 +851,7 @@ fn position_window_on_screen(window: &tauri::WebviewWindow, screen_num: u32) {
 struct SchedEvents {
     app: tauri::AppHandle,
     shared: Arc<Mutex<Shared>>,
-    out: Arc<Mutex<Option<tokio::sync::mpsc::Sender<Message>>>>,
+    out: OutSlot,
 }
 
 impl scheduler::Events for SchedEvents {
@@ -794,11 +945,11 @@ fn steer_webview(app: &tauri::AppHandle, url: &str) {
     }
 }
 
-fn broadcast(out: &Arc<Mutex<Option<tokio::sync::mpsc::Sender<Message>>>>, msg: Message) {
+pub(crate) fn broadcast(out: &OutSlot, msg: Message) {
     let Some(tx) = out.lock().unwrap().clone() else {
         return;
     };
-    let _ = tx.try_send(msg);
+    let _ = tx.try_send(Outbound::Own(msg));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -807,7 +958,7 @@ async fn dispatch(
     shared: Arc<Mutex<Shared>>,
     sched: tokio::sync::mpsc::Sender<scheduler::Cmd>,
     logic_handle: Arc<Mutex<Option<LogicHandle>>>,
-    out: Arc<Mutex<Option<tokio::sync::mpsc::Sender<Message>>>>,
+    out: OutSlot,
     stream: Arc<Mutex<Option<update::StreamState>>>,
     app: tauri::AppHandle,
 ) {
@@ -844,12 +995,27 @@ async fn dispatch(
                 .await;
             Some(Ok(m))
         }
+        Message::SetConfig { .. } | Message::SetLogic { .. } if is_mirror(&shared) => Some(Err(
+            "this is a mirror stage: it shows its relay's screen, not a rotation".into(),
+        )),
         Message::SetConfig { yaml } => {
             Some(set_config(yaml, &shared, &sched, &logic_handle, &app).await)
         }
         Message::SetLogic { rhai } => {
             Some(set_logic(rhai, &shared, &sched, &logic_handle, &app).await)
         }
+        Message::SetRelay {
+            to,
+            secret_hex,
+            settle_secs,
+            every_secs,
+        } => Some(set_relay(to, secret_hex, settle_secs, every_secs, &shared, &out, &app).await),
+        Message::SetMirror { secret_hex } => Some(set_mirror(secret_hex, &shared, &app).await),
+        // Frame traffic only counts under the frame key (see route_frame).
+        Message::Frame { .. }
+        | Message::FrameTiles { .. }
+        | Message::FrameEnd { .. }
+        | Message::FrameNeed { .. } => None,
         Message::GetState => {
             let snap = shared.lock().unwrap().state.clone();
             broadcast(&out, Message::State(snap));
@@ -883,10 +1049,12 @@ async fn dispatch(
                 let socks = ctx.inner().broker_url.clone();
                 let name = Some(ctx.inner().stage_name.clone());
                 let screen = ctx.inner().screen;
+                let mirror = ctx.inner().mirror;
                 let res = match autostart::install(&autostart::AutostartArgs {
                     socks,
                     name,
                     screen,
+                    mirror,
                 }) {
                     Ok(Some(p)) => Ok(format!("installed at {}", p.display())),
                     Ok(None) => Ok("no-op on this OS".into()),
@@ -1142,6 +1310,93 @@ async fn dispatch(
         };
         broadcast(&out, Message::Reply { ok, message });
     }
+}
+
+fn is_mirror(shared: &Arc<Mutex<Shared>>) -> bool {
+    shared.lock().unwrap().state.mirror
+}
+
+async fn set_relay(
+    to: Option<String>,
+    secret_hex: Option<String>,
+    settle_secs: u64,
+    every_secs: u64,
+    shared: &Arc<Mutex<Shared>>,
+    out: &OutSlot,
+    app: &tauri::AppHandle,
+) -> Result<String, String> {
+    if is_mirror(shared) {
+        return Err("a mirror stage cannot also be a relay".into());
+    }
+    let tx = app
+        .try_state::<Roles>()
+        .and_then(|r| r.relay.clone())
+        .ok_or("relay task not running")?;
+    let path = persist::relay_path().map_err(|e| format!("{e:#}"))?;
+    let (cfg, reply) = match to {
+        None => {
+            persist::remove(&path).map_err(|e| format!("{e:#}"))?;
+            (None, "relay off".to_string())
+        }
+        Some(to) => {
+            let secret_hex = secret_hex.ok_or("SetRelay without a frame secret")?;
+            let cfg = relay::RelayCfg {
+                to: to.clone(),
+                secret_hex,
+                settle_secs,
+                every_secs: every_secs.max(5),
+            };
+            cfg.link().map_err(|e| format!("{e:#}"))?;
+            persist::save_json(&path, &cfg).map_err(|e| format!("persist relay.json: {e:#}"))?;
+            let reply = format!(
+                "relaying to {to}: capture {settle_secs}s after each page load, then every {}s",
+                cfg.every_secs
+            );
+            (Some(cfg), reply)
+        }
+    };
+    tx.send(relay::Cmd::Configure(cfg))
+        .await
+        .map_err(|_| "relay task is gone".to_string())?;
+    // The relay task sets State::relay_to; give it a beat, then publish.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let snap = shared.lock().unwrap().state.clone();
+    broadcast(out, Message::State(snap));
+    about::emit_state(app, WINDOW_LABEL);
+    Ok(reply)
+}
+
+async fn set_mirror(
+    secret_hex: Option<String>,
+    shared: &Arc<Mutex<Shared>>,
+    app: &tauri::AppHandle,
+) -> Result<String, String> {
+    if !is_mirror(shared) {
+        return Err("not a mirror stage: start catstage with --mirror".into());
+    }
+    let tx = app
+        .try_state::<Roles>()
+        .and_then(|r| r.mirror.clone())
+        .ok_or("mirror task not running")?;
+    let path = persist::mirror_path().map_err(|e| format!("{e:#}"))?;
+    let name = shared.lock().unwrap().state.name.clone();
+    let (cfg, reply) = match secret_hex {
+        None => {
+            persist::remove(&path).map_err(|e| format!("{e:#}"))?;
+            (None, "unpaired".to_string())
+        }
+        Some(secret_hex) => {
+            let cfg = mirror::MirrorCfg { secret_hex };
+            cfg.link(&name).map_err(|e| format!("{e:#}"))?;
+            persist::save_json(&path, &cfg).map_err(|e| format!("persist mirror.json: {e:#}"))?;
+            (Some(cfg), "paired".to_string())
+        }
+    };
+    tx.send(mirror::Cmd::Configure(cfg))
+        .await
+        .map_err(|_| "mirror task is gone".to_string())?;
+    about::emit_state(app, WINDOW_LABEL);
+    Ok(reply)
 }
 
 /// Append a load-state hint to a Pause/Play/Manual-off reply so the operator

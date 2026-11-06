@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>catcast mirror</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+      img { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: contain; display: none; }
+      #wait {
+        position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+        color: #8b949e; font: 20px ui-sans-serif, system-ui, "Segoe UI", sans-serif; text-align: center;
+      }
+      #badge {
+        position: fixed; right: 10px; bottom: 8px; padding: 2px 8px; border-radius: 4px;
+        font: 12px ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+        color: rgba(255,255,255,.75); background: rgba(0,0,0,.45); display: none;
+      }
+      #badge.stale { color: #fff; background: #b42318; font-size: 16px; padding: 6px 12px; }
+    </style>
+  </head>
+  <body>
+    <img id="frame" alt="" />
+    <div id="wait">Waiting for the relay…<br /><small>F1 shows this stage's name and pairing code</small></div>
+    <div id="badge"></div>
+    <script>
+      (function () {
+        const t = window.__TAURI__ || {};
+        const invoke = (t.core && t.core.invoke) || t.invoke || (() => Promise.reject(new Error("no Tauri bridge")));
+        const listen = (t.event && t.event.listen) || (() => Promise.resolve(() => {}));
+        // The relay re-confirms an unchanged screen every 10 minutes.
+        const STALE_MS = 25 * 60 * 1000;
+        const img = document.getElementById("frame");
+        const wait = document.getElementById("wait");
+        const badge = document.getElementById("badge");
+        let meta = null;
+        let objectUrl = null;
+
+        const hhmm = (ms) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+        function renderBadge() {
+          if (!meta) { badge.style.display = "none"; return; }
+          const stale = Date.now() - meta.confirmed_ts > STALE_MS;
+          badge.className = stale ? "stale" : "";
+          badge.textContent = stale ? "STALE since " + hhmm(meta.confirmed_ts) : "as of " + hhmm(meta.confirmed_ts);
+          badge.style.display = "block";
+        }
+
+        async function load() {
+          try {
+            const buf = await invoke("get_frame");
+            meta = await invoke("get_frame_meta");
+            if (buf && buf.byteLength) {
+              const next = URL.createObjectURL(new Blob([buf], { type: "image/png" }));
+              // Swap only once decoded, so the old frame stays up meanwhile.
+              const probe = new Image();
+              probe.onload = () => {
+                img.src = next;
+                img.style.display = "block";
+                wait.style.display = "none";
+                if (objectUrl) URL.revokeObjectURL(objectUrl);
+                objectUrl = next;
+              };
+              probe.src = next;
+            }
+          } catch (e) {
+            console.error("mirror: " + e);
+          }
+          renderBadge();
+        }
+
+        listen("catcast://frame", load);
+        load();
+        setInterval(renderBadge, 30 * 1000);
+      })();
+    </script>
+  </body>
+</html>

@@ -37,11 +37,22 @@ base64 = { workspace = true }
 rhai = { version = "1.21", features = ["sync"] }
 gethostname = "1"
 tracing = "0.1"
+rand = { workspace = true }
+qrcodegen = "1.8"
 
 tauri = { version = "2", features = ["devtools"] }
 
 [target.'cfg(windows)'.dependencies]
 mslnk = "0.1"
+# Same versions tauri-runtime-wry uses, so the controller type from
+# `with_webview` is the one these bindings expect (relay screen capture).
+webview2-com = "0.38"
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Relay screen capture in the Linux dev loop; versions match wry's.
+webkit2gtk = "2.0"
+cairo-rs = "0.18"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

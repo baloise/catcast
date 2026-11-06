@@ -1,4 +1,5 @@
 pub mod sign;
+pub mod tiles;
 pub mod update;
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose, Engine as _};

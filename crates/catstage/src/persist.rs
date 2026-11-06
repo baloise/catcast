@@ -7,6 +7,10 @@
 //! - `logic.rhai`    — current Rhai logic source.
 //! - `state.json`    — last persisted [`State`] snapshot.
 //! - `socks.url`     — last `--socks` broker URL, used when started without one.
+//! - `relay.json`    — relay pairing (mirror name, frame secret, timing).
+//! - `mirror.json`   — mirror pairing (frame secret).
+//! - `mirror.name`   — the generated name of a `--mirror` stage.
+//! - `frame.json` + `tiles/` — the mirror's last frame and its tile store.
 //!
 //! Persist writes are synchronous and best-effort: failures are surfaced as
 //! `anyhow::Error` and the caller decides whether to log+continue.
@@ -38,6 +42,73 @@ pub fn state_path() -> Result<PathBuf> {
 }
 pub fn socks_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("socks.url"))
+}
+
+pub fn relay_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("relay.json"))
+}
+pub fn mirror_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("mirror.json"))
+}
+pub fn mirror_name_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("mirror.name"))
+}
+pub fn frame_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("frame.json"))
+}
+pub fn tiles_dir() -> Result<PathBuf> {
+    let dir = config_dir()?.join("tiles");
+    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    Ok(dir)
+}
+
+/// Read a JSON file into `T`; `None` when it does not exist.
+pub fn load_json<T: serde::de::DeserializeOwned>(p: &Path) -> Result<Option<T>> {
+    let Some(text) = read_if_exists(p)? else {
+        return Ok(None);
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .with_context(|| format!("parsing {}", p.display()))
+}
+
+pub fn save_json<T: serde::Serialize>(p: &Path, value: &T) -> Result<()> {
+    let s = serde_json::to_string_pretty(value).context("encoding JSON")?;
+    write_atomic(p, &s)
+}
+
+/// Remove `p` if present.
+pub fn remove(p: &Path) -> Result<()> {
+    match fs::remove_file(p) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("removing {}", p.display())),
+    }
+}
+
+/// The remembered name of a `--mirror` stage, created on first use: 20
+/// characters from an unambiguous alphabet (~99 bits). The name is the key
+/// under which the frame secret reaches the mirror, so it must not be
+/// guessable like a hostname.
+pub fn mirror_name() -> Result<String> {
+    let p = mirror_name_path()?;
+    if let Some(n) = read_if_exists(&p)?.map(|s| s.trim().to_owned()) {
+        if !n.is_empty() {
+            return Ok(n);
+        }
+    }
+    let n = random_name();
+    write_atomic(&p, &format!("{n}\n"))?;
+    Ok(n)
+}
+
+pub fn random_name() -> String {
+    use rand::Rng;
+    const ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
+    let mut rng = rand::thread_rng();
+    (0..20)
+        .map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char)
+        .collect()
 }
 
 fn read_if_exists(p: &Path) -> Result<Option<String>> {
@@ -236,6 +307,29 @@ mod tests {
         let migrated = migrate_state_v1_to_v2(v1);
         let s: State = serde_json::from_value(migrated).unwrap();
         assert_eq!(s.mode, Mode::Playing);
+    }
+
+    #[test]
+    fn random_names_are_long_distinct_and_unambiguous() {
+        let a = random_name();
+        let b = random_name();
+        assert_eq!(a.len(), 20);
+        assert_ne!(a, b);
+        assert!(a.chars().all(|c| !"01ilo".contains(c)), "{a}");
+    }
+
+    #[test]
+    fn json_helpers_round_trip_and_remove() {
+        let dir = tempdir().join("json-helpers");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("x.json");
+        assert_eq!(load_json::<Vec<u32>>(&p).unwrap(), None);
+        save_json(&p, &vec![1u32, 2]).unwrap();
+        assert_eq!(load_json::<Vec<u32>>(&p).unwrap(), Some(vec![1, 2]));
+        remove(&p).unwrap();
+        remove(&p).unwrap();
+        assert!(!p.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn tempdir() -> PathBuf {

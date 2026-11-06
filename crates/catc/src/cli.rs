@@ -93,6 +93,12 @@ pub enum Cmd {
     Trace(Targets),
     /// Cleanly stop the stage process.
     Shutdown(Targets),
+    /// Pair a stage inside the network (relay) with a stage outside it
+    /// (mirror, started with `catstage --mirror`).
+    Relay {
+        #[command(subcommand)]
+        sub: RelayCmd,
+    },
     /// Print catc's version and the latest published release.
     Version,
     /// Update this catc binary in place to a release (verifies SHA-256 and
@@ -259,6 +265,43 @@ pub struct UpdateOpts {
 }
 
 #[derive(Subcommand)]
+pub enum RelayCmd {
+    /// Make <RELAY> push screenshots of what it shows to <MIRROR>.
+    ///
+    /// Generates a random frame secret and hands it to both stages over
+    /// the encrypted channel; nothing to type but the mirror's name (shown
+    /// on its about page as text and QR code). Both stages must be
+    /// registered with `catc stage add`. Best on its own broker room, since
+    /// every stage in a room receives every frame.
+    Pair {
+        /// The stage inside the network whose screen is mirrored.
+        #[arg(long)]
+        relay: String,
+        /// The `--mirror` stage outside the network.
+        #[arg(long)]
+        mirror: String,
+        /// Wait after each page load before capturing, e.g. `3s`.
+        #[arg(long, default_value = "3s")]
+        settle: String,
+        /// Re-capture interval while the relay stays on one page.
+        #[arg(long, default_value = "60s")]
+        every: String,
+        /// Accept a mirror name shorter than 16 characters. The frame
+        /// secret travels encrypted under that name, so a guessable name
+        /// exposes every frame.
+        #[arg(long)]
+        insecure_name: bool,
+    },
+    /// Stop <RELAY> from pushing frames (and unpair <MIRROR> if given).
+    Off {
+        #[arg(long)]
+        relay: String,
+        #[arg(long)]
+        mirror: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum AliasCmd {
     /// Store a catc command line under a short name.
     Add {
@@ -380,6 +423,16 @@ pub async fn run(cli: Cli) -> Result<()> {
         Cmd::About(t) => cmd_send(t, Message::NavAbout).await,
         Cmd::Trace(t) => cmd_trace(t).await,
         Cmd::Shutdown(t) => cmd_send(t, Message::Shutdown).await,
+        Cmd::Relay { sub } => match sub {
+            RelayCmd::Pair {
+                relay,
+                mirror,
+                settle,
+                every,
+                insecure_name,
+            } => cmd_relay_pair(relay, mirror, &settle, &every, insecure_name).await,
+            RelayCmd::Off { relay, mirror } => cmd_relay_off(relay, mirror).await,
+        },
         Cmd::Version => cmd_version().await,
         Cmd::SelfUpdate { version, force } => cmd_self_update(version, force).await,
     }
@@ -706,7 +759,7 @@ fn fmt_ts(ms: i64) -> String {
 /// Last column of `stage list --probe`: the host the webview is actually
 /// on, flagged when it is not the intended one.
 fn where_column(st: &catcast_core::State) -> String {
-    match st
+    let place = match st
         .actual_url
         .as_deref()
         .and_then(catcast_core::state::url_host)
@@ -714,7 +767,160 @@ fn where_column(st: &catcast_core::State) -> String {
         None => String::new(),
         Some(h) if st.stuck() => format!("STUCK on {h}"),
         Some(h) => format!("on {h}"),
+    };
+    let now = chrono::Utc::now().timestamp_millis();
+    let role = relay_column(st, now);
+    match (place.is_empty(), role.is_empty()) {
+        (_, true) => place,
+        (true, false) => role,
+        (false, false) => format!("{place}\t{role}"),
     }
+}
+
+/// `relay→<mirror> frame 12s` / `mirror frame 3m`, empty for plain stages.
+fn relay_column(st: &catcast_core::State, now_ms: i64) -> String {
+    let frame = match st.last_frame_ts {
+        Some(ts) => format!(
+            "frame {}",
+            humantime::format_duration(std::time::Duration::from_secs(
+                (now_ms - ts).max(0) as u64 / 1000
+            ))
+        ),
+        None => "no frame yet".into(),
+    };
+    match (&st.relay_to, st.mirror) {
+        (Some(to), _) => format!("relay→{to} {frame}"),
+        (None, true) => format!("mirror {frame}"),
+        (None, false) => String::new(),
+    }
+}
+
+/// Minimum mirror-name length `relay pair` accepts without
+/// `--insecure-name`. Generated mirror names have 20.
+const MIN_MIRROR_NAME: usize = 16;
+
+fn check_mirror_name(name: &str, insecure_ok: bool) -> Result<()> {
+    if name.chars().count() < MIN_MIRROR_NAME && !insecure_ok {
+        bail!(
+            "mirror name {name:?} is shorter than {MIN_MIRROR_NAME} characters; the frame \
+             secret is sent encrypted under it. Start the mirror with `catstage --mirror` \
+             and no --name to get a random one, or pass --insecure-name"
+        );
+    }
+    Ok(())
+}
+
+fn new_frame_secret() -> String {
+    use rand::RngCore;
+    let mut secret = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut secret);
+    catcast_proto::to_hex(&secret)
+}
+
+async fn cmd_relay_pair(
+    relay: String,
+    mirror: String,
+    settle: &str,
+    every: &str,
+    insecure_name: bool,
+) -> Result<()> {
+    check_mirror_name(&mirror, insecure_name)?;
+    if relay == mirror {
+        bail!("relay and mirror must be different stages");
+    }
+    let settle =
+        humantime::parse_duration(settle).with_context(|| format!("--settle {settle:?}"))?;
+    let every = humantime::parse_duration(every).with_context(|| format!("--every {every:?}"))?;
+    let secret_hex = new_frame_secret();
+    // Mirror first: it must know the secret before the first frame arrives.
+    send_one_each(vec![
+        (
+            mirror.clone(),
+            Message::SetMirror {
+                secret_hex: Some(secret_hex.clone()),
+            },
+        ),
+        (
+            relay.clone(),
+            Message::SetRelay {
+                to: Some(mirror.clone()),
+                secret_hex: Some(secret_hex),
+                settle_secs: settle.as_secs(),
+                every_secs: every.as_secs(),
+            },
+        ),
+    ])
+    .await?;
+    println!(
+        "paired: {relay} → {mirror}. Watch it with `catc stage list --probe`. \
+         Frames reach every stage in the broker room; a room of their own keeps them apart."
+    );
+    Ok(())
+}
+
+async fn cmd_relay_off(relay: String, mirror: Option<String>) -> Result<()> {
+    let mut sends = vec![(
+        relay,
+        Message::SetRelay {
+            to: None,
+            secret_hex: None,
+            settle_secs: 0,
+            every_secs: 0,
+        },
+    )];
+    if let Some(m) = mirror {
+        sends.push((m, Message::SetMirror { secret_hex: None }));
+    }
+    send_one_each(sends).await
+}
+
+/// Send one message to each named (registered) stage, in order, and print
+/// each stage's reply. Fails if any stage errs or stays silent.
+async fn send_one_each(sends: Vec<(String, Message)>) -> Result<()> {
+    let cfg = CatcConfig::load()?;
+    for (n, _) in &sends {
+        if cfg.stage(n).is_none() {
+            bail!("stage {n:?} not registered (run `catc stage add {n}`)");
+        }
+    }
+    let names: Vec<String> = sends.iter().map(|(n, _)| n.clone()).collect();
+    let keys = keys_for(&names)?;
+    let mut br = Broker::connect(&cfg.socks).await?;
+    let mut all_ok = true;
+    for (name, msg) in &sends {
+        let key = keys.get(name).expect("key just derived");
+        br.send(key, name, msg).await?;
+        let mut reply: Option<(bool, String)> = None;
+        br.collect_until(&keys, Duration::from_secs(5), |nm, pt| {
+            if nm != name {
+                return false;
+            }
+            if let Message::Reply { ok, message } = pt.msg {
+                reply = Some((ok, message));
+                return true;
+            }
+            false
+        })
+        .await;
+        match reply {
+            Some((true, m)) => println!("{name}: ok {m}"),
+            Some((false, m)) => {
+                println!("{name}: ERR {m}");
+                all_ok = false;
+                break;
+            }
+            None => {
+                println!("{name}: no reply within 5s (stage offline?)");
+                all_ok = false;
+                break;
+            }
+        }
+    }
+    br.close().await;
+    if !all_ok {
+        bail!("not all stages accepted the change");
+    }
+    Ok(())
 }
 
 async fn cmd_targets_list(probe: bool) -> Result<()> {
@@ -1454,4 +1660,36 @@ fn shell_split(s: &str) -> Vec<String> {
         out.push(cur);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_mirror_names_need_an_explicit_opt_in() {
+        assert!(check_mirror_name("lobby-tv", false).is_err());
+        assert!(check_mirror_name("lobby-tv", true).is_ok());
+        assert!(check_mirror_name("abcdefghjkmnpqrstuvw", false).is_ok());
+    }
+
+    #[test]
+    fn frame_secrets_are_random_hex() {
+        let a = new_frame_secret();
+        assert_eq!(catcast_proto::parse_frame_secret(&a).unwrap().len(), 32);
+        assert_ne!(a, new_frame_secret());
+    }
+
+    #[test]
+    fn relay_column_shows_role_and_frame_age() {
+        let mut st = catcast_core::State::fresh("r", "0.4.1");
+        assert_eq!(relay_column(&st, 0), "");
+        st.relay_to = Some("m".into());
+        st.last_frame_ts = Some(1_000);
+        assert_eq!(relay_column(&st, 13_000), "relay→m frame 12s");
+        st.relay_to = None;
+        st.mirror = true;
+        st.last_frame_ts = None;
+        assert_eq!(relay_column(&st, 0), "mirror no frame yet");
+    }
 }

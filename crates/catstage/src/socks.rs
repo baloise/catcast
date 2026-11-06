@@ -8,6 +8,12 @@
 //! Outbound encrypted frames flow through an mpsc sender returned by
 //! [`spawn`] so the dispatch path can answer `GetState`, broadcast
 //! `State` updates, etc.
+//!
+//! A relay or mirror stage also holds a second key, the frame key (see
+//! [`FrameLink`]). Messages under it are tagged [`Via::Frame`] so dispatch
+//! only accepts relay/mirror traffic that way, never commands: whoever
+//! holds the frame secret (say, a thief of the mirror box) cannot steer
+//! the relay.
 
 use anyhow::Context;
 use catcast_proto::{decrypt, encrypt, Key, Message, Plaintext, ProtoError};
@@ -17,9 +23,40 @@ use std::time::Duration;
 use tokio::sync::{mpsc, Notify};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
+/// Which key an inbound message decrypted under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Via {
+    /// The stage's own name-derived key: operator commands.
+    Own,
+    /// The relay/mirror frame key: frames and tile requests only.
+    Frame,
+}
+
 /// Inbound, post-decrypt message addressed to this stage.
-pub type InboundHandler = Arc<dyn Fn(Plaintext) + Send + Sync>;
+pub type InboundHandler = Arc<dyn Fn(Plaintext, Via) + Send + Sync>;
 pub type ConnectionHandler = Arc<dyn Fn(bool) + Send + Sync>;
+
+/// What the stage sends: its own messages under its own key, or relay /
+/// mirror traffic under the frame key.
+#[derive(Debug, Clone)]
+pub enum Outbound {
+    Own(Message),
+    Frame(Message),
+}
+
+/// The frame key and the name frames are addressed to (always the mirror's
+/// name: the relay sends to it, the mirror answers under it).
+pub struct FrameLink {
+    pub key: Arc<Key>,
+    pub target: String,
+}
+
+/// Set by `SetRelay` / `SetMirror` at runtime, read per message.
+pub type FrameSlot = Arc<std::sync::RwLock<Option<FrameLink>>>;
+
+/// The outbound sender, `None` until the socks task is up and always in
+/// offline modes.
+pub type OutSlot = Arc<std::sync::Mutex<Option<mpsc::Sender<Outbound>>>>;
 
 /// Reason the inner `connect_and_pump` loop exited. Used by `run` to decide
 /// whether to honour the backoff timer or reconnect immediately.
@@ -46,32 +83,82 @@ enum Disconnect {
 /// encrypts them with `key`, addressed to `name`, and pushes them on the
 /// socket. While disconnected, messages queue in the bounded channel and
 /// drain on reconnect.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn(
     url: String,
     name: String,
     key: Arc<Key>,
+    frame: FrameSlot,
     handler: InboundHandler,
     abort: Arc<Notify>,
     on_connection: ConnectionHandler,
-) -> mpsc::Sender<Message> {
-    let (tx, rx) = mpsc::channel::<Message>(64);
-    tokio::spawn(run(url, name, key, handler, rx, abort, on_connection));
+) -> mpsc::Sender<Outbound> {
+    let (tx, rx) = mpsc::channel::<Outbound>(64);
+    let link = Link {
+        name,
+        key,
+        frame,
+        handler,
+    };
+    tokio::spawn(run(url, link, rx, abort, on_connection));
     tx
+}
+
+/// Everything the pump needs to decrypt and encrypt.
+struct Link {
+    name: String,
+    key: Arc<Key>,
+    frame: FrameSlot,
+    handler: InboundHandler,
+}
+
+impl Link {
+    fn inbound(&self, text: &str) {
+        match decrypt(&self.key, text) {
+            Ok(pt) if pt.target == self.name => return (self.handler)(pt, Via::Own),
+            Ok(_) => return, // wrong target → drop silently
+            Err(ProtoError::Decrypt) => {}
+            Err(ProtoError::Replay { .. }) | Err(ProtoError::WrongTarget { .. }) => return,
+            Err(e) => {
+                tracing::debug!("socks: unparseable envelope dropped: {e}");
+                return;
+            }
+        }
+        let guard = self.frame.read().expect("frame slot poisoned");
+        let Some(link) = guard.as_ref() else { return };
+        if let Ok(pt) = decrypt(&link.key, text) {
+            if pt.target == link.target {
+                drop(guard);
+                (self.handler)(pt, Via::Frame);
+            }
+        }
+    }
+
+    /// Encrypt one outbound message; `None` for frame traffic while no
+    /// frame key is set (dropped).
+    fn seal(&self, out: &Outbound) -> Option<anyhow::Result<String>> {
+        match out {
+            Outbound::Own(msg) => Some(encrypt(&self.key, &self.name, msg).map_err(Into::into)),
+            Outbound::Frame(msg) => {
+                let guard = self.frame.read().expect("frame slot poisoned");
+                let link = guard.as_ref()?;
+                Some(encrypt(&link.key, &link.target, msg).map_err(Into::into))
+            }
+        }
+    }
 }
 
 async fn run(
     url: String,
-    name: String,
-    key: Arc<Key>,
-    handler: InboundHandler,
-    mut rx: mpsc::Receiver<Message>,
+    link: Link,
+    mut rx: mpsc::Receiver<Outbound>,
     abort: Arc<Notify>,
     on_connection: ConnectionHandler,
 ) {
     let mut backoff = Duration::from_millis(500);
     on_connection(false);
     loop {
-        match connect_and_pump(&url, &name, &key, &handler, &mut rx, &abort, &on_connection).await {
+        match connect_and_pump(&url, &link, &mut rx, &abort, &on_connection).await {
             Disconnect::Shutdown => {
                 on_connection(false);
                 tracing::info!("socks: channel closed, exiting");
@@ -104,10 +191,8 @@ async fn run(
 
 async fn connect_and_pump(
     url: &str,
-    name: &str,
-    key: &Key,
-    handler: &InboundHandler,
-    rx: &mut mpsc::Receiver<Message>,
+    link: &Link,
+    rx: &mut mpsc::Receiver<Outbound>,
     abort: &Notify,
     on_connection: &ConnectionHandler,
 ) -> Disconnect {
@@ -132,17 +217,7 @@ async fn connect_and_pump(
             }
             ws_msg = stream.next() => {
                 match ws_msg {
-                    Some(Ok(WsMessage::Text(text))) => {
-                        match decrypt(key, text.as_str()) {
-                            Ok(pt) if pt.target == name => handler(pt),
-                            Ok(_) => { /* wrong target → drop silently */ }
-                            Err(ProtoError::Decrypt) | Err(ProtoError::Replay { .. })
-                            | Err(ProtoError::WrongTarget { .. }) => { /* drop silently */ }
-                            Err(e) => {
-                                tracing::debug!("socks: unparseable envelope dropped: {e}");
-                            }
-                        }
-                    }
+                    Some(Ok(WsMessage::Text(text))) => link.inbound(text.as_str()),
                     Some(Ok(WsMessage::Binary(_))) => {
                         // Broker speaks text frames only — drop.
                     }
@@ -163,11 +238,12 @@ async fn connect_and_pump(
                     let _ = sink.close().await;
                     return Disconnect::Shutdown;
                 };
-                let env = match encrypt(key, name, &msg)
-                    .context("encrypting outbound message")
-                {
-                    Ok(e) => e,
-                    Err(e) => return Disconnect::Error(e),
+                let env = match link.seal(&msg) {
+                    None => continue,
+                    Some(Ok(e)) => e,
+                    Some(Err(e)) => {
+                        return Disconnect::Error(e.context("encrypting outbound message"))
+                    }
                 };
                 if let Err(e) = sink.send(WsMessage::Text(env.into())).await {
                     return Disconnect::Error(anyhow::anyhow!("send failed: {e}"));
