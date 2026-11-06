@@ -10,6 +10,11 @@
 //! Hashing pixels instead of the PNG bytes matters: PNG is a compressed
 //! stream, so one changed pixel changes every byte after it.
 
+// `chunks_exact` with a constant size, not `as_chunks`: the workspace MSRV
+// is 1.82 and `as_chunks` is 1.88. `unknown_lints` keeps older clippy quiet
+// about a lint it does not know yet.
+#![allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
+
 use anyhow::{bail, ensure, Context, Result};
 use base64::Engine as _;
 use catcast_proto::TILE_HASH_LEN;

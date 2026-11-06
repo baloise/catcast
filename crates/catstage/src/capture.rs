@@ -159,7 +159,9 @@ fn start(window: &tauri::WebviewWindow, reply: Reply) -> Result<()> {
 }
 
 /// Cairo ARGB32 / RGB24 (native-endian, premultiplied) to straight RGBA.
+/// (`chunks_exact`, not `as_chunks`: MSRV 1.82.)
 #[cfg(target_os = "linux")]
+#[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
 fn surface_to_rgba(surface: cairo::Surface) -> Result<Image> {
     let img = cairo::ImageSurface::try_from(surface)
         .map_err(|_| anyhow!("snapshot is not an image surface"))?;
