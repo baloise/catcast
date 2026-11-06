@@ -292,6 +292,17 @@ pub enum RelayCmd {
         #[arg(long)]
         insecure_name: bool,
     },
+    /// Set how much disk <MIRROR> may use for cached tiles (default 64MB).
+    ///
+    /// More cache means more pages of the relay's rotation come back for
+    /// free; the least recently shown tiles are dropped first. Applies at
+    /// once and survives restarts.
+    Cache {
+        #[arg(long)]
+        mirror: String,
+        /// e.g. `256MB`, `2GB`; a bare number is MB. Minimum 8MB.
+        size: String,
+    },
     /// Stop <RELAY> from pushing frames (and unpair <MIRROR> if given).
     Off {
         #[arg(long)]
@@ -432,6 +443,10 @@ pub async fn run(cli: Cli) -> Result<()> {
                 insecure_name,
             } => cmd_relay_pair(relay, mirror, &settle, &every, insecure_name).await,
             RelayCmd::Off { relay, mirror } => cmd_relay_off(relay, mirror).await,
+            RelayCmd::Cache { mirror, size } => {
+                let cap_bytes = parse_size(&size)?;
+                send_one_each(vec![(mirror, Message::SetMirrorCache { cap_bytes })]).await
+            }
         },
         Cmd::Version => cmd_version().await,
         Cmd::SelfUpdate { version, force } => cmd_self_update(version, force).await,
@@ -808,6 +823,29 @@ fn check_mirror_name(name: &str, insecure_ok: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// `256MB`, `2 GB`, `512` (MB), `1.5GB`. Binary units: 1 MB = 2^20 bytes.
+fn parse_size(s: &str) -> Result<u64> {
+    let t = s.trim().to_ascii_uppercase();
+    let split = t
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(t.len());
+    let (num, unit) = t.split_at(split);
+    let n: f64 = num
+        .parse()
+        .with_context(|| format!("size {s:?}: expected a number like 256MB"))?;
+    let mul: f64 = match unit.trim().trim_end_matches("IB").trim_end_matches('B') {
+        "" | "M" => (1u64 << 20) as f64,
+        "K" => (1u64 << 10) as f64,
+        "G" => (1u64 << 30) as f64,
+        "T" => (1u64 << 40) as f64,
+        other => bail!("size {s:?}: unknown unit {other:?} (use KB, MB, GB, TB)"),
+    };
+    if !(n.is_finite() && n > 0.0) {
+        bail!("size {s:?} must be positive");
+    }
+    Ok((n * mul) as u64)
 }
 
 fn new_frame_secret() -> String {
@@ -1671,6 +1709,18 @@ mod tests {
         assert!(check_mirror_name("lobby-tv", false).is_err());
         assert!(check_mirror_name("lobby-tv", true).is_ok());
         assert!(check_mirror_name("abcdefghjkmnpqrstuvw", false).is_ok());
+    }
+
+    #[test]
+    fn sizes_parse_with_binary_units() {
+        assert_eq!(parse_size("256MB").unwrap(), 256 << 20);
+        assert_eq!(parse_size("256").unwrap(), 256 << 20);
+        assert_eq!(parse_size("2 GB").unwrap(), 2 << 30);
+        assert_eq!(parse_size("1.5gib").unwrap(), 3 << 29);
+        assert_eq!(parse_size("512k").unwrap(), 512 << 10);
+        assert!(parse_size("lots").is_err());
+        assert!(parse_size("5XB").is_err());
+        assert!(parse_size("0MB").is_err());
     }
 
     #[test]

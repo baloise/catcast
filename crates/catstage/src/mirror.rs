@@ -1,7 +1,7 @@
 //! Mirror role: show the frames a paired relay pushes.
 //!
-//! Tiles are kept by hash in `tiles/` (capped at [`STORE_CAP_BYTES`],
-//! least recently used first), so pages that come back in the relay's
+//! Tiles are kept by hash in `tiles/` (capped at [`DEFAULT_CAP_BYTES`]
+//! unless `catc relay cache` set another cap; least recently used go first), so pages that come back in the relay's
 //! rotation cost only their list of hashes. Every received tile is decoded
 //! and re-hashed before it is stored; a tile whose pixels do not match its
 //! name is dropped. A frame is shown once every tile is present; missing
@@ -23,8 +23,30 @@ use std::sync::{Arc, Mutex};
 use tauri::Emitter;
 use tokio::sync::mpsc;
 
-/// Tile store budget. A 1080p screen of dashboard tiles is ~0.3–1.5 MB.
-pub const STORE_CAP_BYTES: u64 = 64 * 1024 * 1024;
+/// Default tile store budget. A 1080p screen of dashboard tiles is
+/// ~0.3–1.5 MB, so this holds a rotation of several dozen pages.
+pub const DEFAULT_CAP_BYTES: u64 = 64 * 1024 * 1024;
+/// Smallest cap accepted: below this even one 4K screen may not fit (the
+/// frame on screen is kept regardless, so this only bounds churn).
+pub const MIN_CAP_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Persisted as `mirror-cache.json`; absent means [`DEFAULT_CAP_BYTES`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheCfg {
+    pub cap_bytes: u64,
+}
+
+/// The cap in effect: the persisted one, else the default.
+pub fn load_cap() -> u64 {
+    crate::persist::mirror_cache_path()
+        .and_then(|p| crate::persist::load_json::<CacheCfg>(&p))
+        .unwrap_or_else(|e| {
+            eprintln!("mirror: ignoring unreadable mirror-cache.json: {e:#}");
+            None
+        })
+        .map(|c| c.cap_bytes.max(MIN_CAP_BYTES))
+        .unwrap_or(DEFAULT_CAP_BYTES)
+}
 /// `FrameNeed` rounds per frame before giving up on it.
 pub const MAX_ROUNDS: u32 = 3;
 /// Event the mirror page listens for.
@@ -83,6 +105,8 @@ pub enum Cmd {
     /// The broker link came up: ask the relay for its current frame.
     Connected,
     Configure(Option<MirrorCfg>),
+    /// New cache cap; answers with the bytes in use after evicting.
+    SetCap(u64, tokio::sync::oneshot::Sender<u64>),
 }
 
 struct Pending {
@@ -99,6 +123,7 @@ struct Mirror {
     name: String,
     view: Arc<MirrorView>,
     store: PathBuf,
+    cap: u64,
     pending: Option<Pending>,
     shown: Option<Vec<Hash>>,
 }
@@ -122,6 +147,7 @@ pub fn spawn(
         name,
         view,
         store,
+        cap: load_cap(),
         pending: None,
         shown: None,
     };
@@ -141,6 +167,21 @@ impl Mirror {
                 Cmd::Connected => self.pull().await,
                 Cmd::Configure(c) => {
                     self.configure(c, true).await;
+                    Ok(())
+                }
+                Cmd::SetCap(cap, reply) => {
+                    self.cap = cap;
+                    let store = self.store.clone();
+                    let keep: HashSet<Hash> = self.shown.iter().flatten().copied().collect();
+                    let used = tokio::task::spawn_blocking(move || evict(&store, cap, &keep))
+                        .await
+                        .unwrap_or(0);
+                    eprintln!(
+                        "mirror: tile cache cap {} MB, {} MB used",
+                        cap >> 20,
+                        used >> 20
+                    );
+                    let _ = reply.send(used);
                     Ok(())
                 }
             };
@@ -268,7 +309,8 @@ impl Mirror {
         }
         let store = self.store.clone();
         let keep: HashSet<Hash> = hashes.into_iter().collect();
-        tokio::task::spawn_blocking(move || evict(&store, STORE_CAP_BYTES, &keep));
+        let cap = self.cap;
+        tokio::task::spawn_blocking(move || evict(&store, cap, &keep));
 
         let snap = {
             let mut sh = self.shared.lock().unwrap();
@@ -375,10 +417,11 @@ pub fn render(store: &Path, rec: &FrameRecord, hashes: &[Hash]) -> Result<Vec<u8
 }
 
 /// Delete least recently used tiles until the store fits `cap` bytes.
-/// Tiles in `keep` (the frame on screen) are never deleted.
-pub fn evict(store: &Path, cap: u64, keep: &HashSet<Hash>) {
+/// Tiles in `keep` (the frame on screen) are never deleted. Returns the
+/// bytes still in use.
+pub fn evict(store: &Path, cap: u64, keep: &HashSet<Hash>) -> u64 {
     let Ok(rd) = std::fs::read_dir(store) else {
-        return;
+        return 0;
     };
     let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = rd
         .filter_map(|e| e.ok())
@@ -389,7 +432,7 @@ pub fn evict(store: &Path, cap: u64, keep: &HashSet<Hash>) {
         .collect();
     let mut total: u64 = files.iter().map(|f| f.1).sum();
     if total <= cap {
-        return;
+        return total;
     }
     files.sort_by_key(|f| f.0);
     for (_, len, path) in files {
@@ -404,6 +447,7 @@ pub fn evict(store: &Path, cap: u64, keep: &HashSet<Hash>) {
             total = total.saturating_sub(len);
         }
     }
+    total
 }
 
 #[cfg(test)]
@@ -473,7 +517,14 @@ mod tests {
         let cut = tiles::split(&screen(), 128);
         store_batch(&store, &cut.iter().map(data_of).collect::<Vec<_>>()).unwrap();
         let keep: HashSet<Hash> = [cut[0].hash].into_iter().collect();
-        evict(&store, 0, &keep);
+        let kept = std::fs::metadata(tile_path(&store, &cut[0].hash))
+            .unwrap()
+            .len();
+        assert!(
+            evict(&store, u64::MAX, &keep) > kept,
+            "nothing evicted under a big cap"
+        );
+        assert_eq!(evict(&store, 0, &keep), kept);
         assert!(tile_path(&store, &cut[0].hash).exists());
         for t in &cut[1..] {
             assert!(!tile_path(&store, &t.hash).exists());

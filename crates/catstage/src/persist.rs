@@ -11,6 +11,7 @@
 //! - `mirror.json`   — mirror pairing (frame secret).
 //! - `mirror.name`   — the generated name of a `--mirror` stage.
 //! - `frame.json` + `tiles/` — the mirror's last frame and its tile store.
+//! - `mirror-cache.json` — the mirror's tile-cache cap, when not the default.
 //!
 //! Persist writes are synchronous and best-effort: failures are surfaced as
 //! `anyhow::Error` and the caller decides whether to log+continue.
@@ -52,6 +53,9 @@ pub fn mirror_path() -> Result<PathBuf> {
 }
 pub fn mirror_name_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("mirror.name"))
+}
+pub fn mirror_cache_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("mirror-cache.json"))
 }
 pub fn frame_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("frame.json"))

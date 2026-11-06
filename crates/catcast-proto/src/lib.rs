@@ -282,6 +282,12 @@ pub enum Message {
         #[serde(default)]
         secret_hex: Option<String>,
     },
+    /// Set the mirror's tile-cache cap in bytes. Persisted on the mirror and
+    /// applied at once (the cache shrinks if needed). The `Reply` reports
+    /// the cap and the space in use.
+    SetMirrorCache {
+        cap_bytes: u64,
+    },
 
     // ─── Relay <-> mirror (frame key only) ───────────────────────────────
     /// A new screenshot: geometry plus the hash of every tile, row-major.
@@ -525,6 +531,7 @@ mod tests {
                 every_secs: 60,
             },
             Message::SetMirror { secret_hex: None },
+            Message::SetMirrorCache { cap_bytes: 1 << 28 },
         ];
         for m in msgs {
             let env = encrypt(&key, "m", &m).unwrap();

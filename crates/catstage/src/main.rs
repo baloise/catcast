@@ -1011,6 +1011,9 @@ async fn dispatch(
             every_secs,
         } => Some(set_relay(to, secret_hex, settle_secs, every_secs, &shared, &out, &app).await),
         Message::SetMirror { secret_hex } => Some(set_mirror(secret_hex, &shared, &app).await),
+        Message::SetMirrorCache { cap_bytes } => {
+            Some(set_mirror_cache(cap_bytes, &shared, &app).await)
+        }
         // Frame traffic only counts under the frame key (see route_frame).
         Message::Frame { .. }
         | Message::FrameTiles { .. }
@@ -1397,6 +1400,42 @@ async fn set_mirror(
         .map_err(|_| "mirror task is gone".to_string())?;
     about::emit_state(app, WINDOW_LABEL);
     Ok(reply)
+}
+
+async fn set_mirror_cache(
+    cap_bytes: u64,
+    shared: &Arc<Mutex<Shared>>,
+    app: &tauri::AppHandle,
+) -> Result<String, String> {
+    if !is_mirror(shared) {
+        return Err("not a mirror stage: start catstage with --mirror".into());
+    }
+    if cap_bytes < mirror::MIN_CAP_BYTES {
+        return Err(format!(
+            "cache cap must be at least {} MB",
+            mirror::MIN_CAP_BYTES >> 20
+        ));
+    }
+    let tx = app
+        .try_state::<Roles>()
+        .and_then(|r| r.mirror.clone())
+        .ok_or("mirror task not running")?;
+    let path = persist::mirror_cache_path().map_err(|e| format!("{e:#}"))?;
+    persist::save_json(&path, &mirror::CacheCfg { cap_bytes })
+        .map_err(|e| format!("persist mirror-cache.json: {e:#}"))?;
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    tx.send(mirror::Cmd::SetCap(cap_bytes, reply_tx))
+        .await
+        .map_err(|_| "mirror task is gone".to_string())?;
+    let used = reply_rx
+        .await
+        .map_err(|_| "mirror task dropped the reply".to_string())?;
+    let mb = |b: u64| b as f64 / (1u64 << 20) as f64;
+    Ok(format!(
+        "tile cache cap {:.0} MB, {:.1} MB in use",
+        mb(cap_bytes),
+        mb(used)
+    ))
 }
 
 /// Append a load-state hint to a Pause/Play/Manual-off reply so the operator

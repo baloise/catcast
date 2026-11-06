@@ -75,6 +75,7 @@ catc stage add lobby-relay
 catc stage add <mirror-name-from-the-qr>
 catc relay pair --relay lobby-relay --mirror <mirror-name> [--settle 3s] [--every 60s]
 catc stage list --probe     # relay→<mirror> frame 12s / mirror frame 12s
+catc relay cache --mirror <mirror-name> 256MB   # tile cache size, default 64MB
 catc relay off --relay lobby-relay --mirror <mirror-name>
 ```
 
@@ -84,7 +85,9 @@ catc relay off --relay lobby-relay --mirror <mirror-name>
 - **Only changed parts travel.** Screenshots are cut into 128-pixel tiles
   and the mirror keeps tiles by content. A page that comes back in the
   rotation costs a list of hashes; a clock ticking in a corner costs the
-  one or two tiles under it. An unchanged screen sends nothing but a
+  one or two tiles under it. The mirror's tile cache holds 64 MB by default,
+  dropping the least recently shown tiles first; raise it with
+  `catc relay cache` for long rotations. An unchanged screen sends nothing but a
   heartbeat every 10 minutes. The mirror marks its picture **STALE** after
   25 minutes without word from the relay, and shows the last picture after
   a reboot.
