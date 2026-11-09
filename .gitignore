@@ -25,3 +25,5 @@ workers/catproxy/node_modules
 # Agent worktrees / Claude scratch space
 .claude/
 catc.toml
+# working copies of `catc config edit` beside a repo-local catc.toml
+/stages/

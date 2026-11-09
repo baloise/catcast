@@ -8,6 +8,7 @@
 mod cfg;
 mod cli;
 mod default_logic;
+mod edit;
 mod net;
 mod release;
 mod status;

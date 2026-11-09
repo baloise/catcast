@@ -50,12 +50,22 @@ catstage.exe --install-autostart --start --socks wss://.../r/<room> --name kitch
 # 3. On your laptop
 catc init --socks wss://.../r/<room>
 catc stage add kitchen        # the name shows on the stage's catcast://about page
-catc config import config.yaml --name kitchen
+catc config edit --name kitchen # download, $EDITOR, diff, push
 catc nav 'https://example.com/board?team=a&view=tv#geek,flags' --for 5m
 catc status                   # broker, stages, mirrors: up/down, last seen, uptime
 ```
 
 See `examples/` for `config.yaml`, `aliases.yaml`, and a default Rhai logic.
+
+**Editing a stage's config.** `catc config edit --name kitchen` (and
+`catc logic edit`) works like `git commit`. It downloads what the stage
+runs into `stages/kitchen/config.yaml` next to your `catc.toml`, opens
+`$VISUAL` / `$EDITOR`, and when the editor closes it validates the file,
+shows a diff and asks before pushing. The copy stays put. The next `edit`
+says so if you left unpushed edits or the stage changed in the meantime.
+GUI editors need to block (`EDITOR="code --wait"`), or pass `--watch` to
+keep the editor open and get a push prompt on every save. `config
+import`/`export` remain for scripting.
 
 **URLs with `?`, `&`, `#` or spaces.** URLs travel and are stored exactly as
 written, but two layers in front of catcast parse them first:

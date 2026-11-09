@@ -105,6 +105,39 @@ pub fn aliases_path() -> Result<PathBuf> {
     Ok(dir.join(ALIASES_FILE))
 }
 
+/// Directory holding the working copies `catc config edit` / `catc logic
+/// edit` keep for one stage: `stages/<name>/` beside the resolved
+/// `catc.toml`, so a repo-local catc.toml keeps its copies in the repo and
+/// the platform default keeps them under the user's home.
+pub fn stage_dir(name: &str) -> Result<PathBuf> {
+    let cfg = config_path()?;
+    let dir = cfg
+        .parent()
+        .ok_or_else(|| anyhow!("config path {} has no parent", cfg.display()))?;
+    Ok(dir.join("stages").join(safe_name(name)))
+}
+
+/// A stage name as a single path component: anything outside
+/// `[A-Za-z0-9._-]` becomes `_`, and a name of only dots is prefixed so it
+/// can never mean `.` or `..`.
+pub fn safe_name(name: &str) -> String {
+    let s: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if s.is_empty() || s.chars().all(|c| c == '.') {
+        format!("_{s}")
+    } else {
+        s
+    }
+}
+
 impl CatcConfig {
     pub fn load() -> Result<Self> {
         let path = config_path()?;

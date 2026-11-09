@@ -52,12 +52,12 @@ pub enum Cmd {
         #[command(flatten)]
         targets: Targets,
     },
-    /// Import or export the rotation config (YAML).
+    /// Edit, import or export the rotation config (YAML).
     Config {
         #[command(subcommand)]
         sub: ConfigCmd,
     },
-    /// Import or export the rotation logic (Rhai).
+    /// Edit, import or export the rotation logic (Rhai).
     Logic {
         #[command(subcommand)]
         sub: LogicCmd,
@@ -174,6 +174,10 @@ pub enum ConfigCmd {
         #[command(flatten)]
         targets: Targets,
     },
+    /// Download the config into a working copy next to catc.toml, open it in
+    /// $VISUAL / $EDITOR, then validate, diff and offer to push it back
+    /// (needs exactly one target).
+    Edit(EditOpts),
 }
 
 #[derive(Subcommand)]
@@ -190,6 +194,21 @@ pub enum LogicCmd {
         #[command(flatten)]
         targets: Targets,
     },
+    /// Download the logic into a working copy next to catc.toml, open it in
+    /// $VISUAL / $EDITOR, then diff and offer to push it back (needs exactly
+    /// one target).
+    Edit(EditOpts),
+}
+
+#[derive(Args)]
+pub struct EditOpts {
+    /// Don't wait for the editor to close: watch the file and offer a push
+    /// on every save until you type `q`. For GUI editors that return at once
+    /// (`code`, Notepad++); a terminal editor would fight over the terminal.
+    #[arg(long)]
+    pub watch: bool,
+    #[command(flatten)]
+    pub targets: Targets,
 }
 
 #[derive(Subcommand)]
@@ -375,6 +394,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             ConfigCmd::Export { targets } => {
                 cmd_export_one(targets, ExportKind::Config, None).await
             }
+            ConfigCmd::Edit(o) => crate::edit::run(crate::edit::Kind::Config, o).await,
         },
         Cmd::Logic { sub } => match sub {
             LogicCmd::Import { file, targets } => {
@@ -387,6 +407,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 cmd_send(targets, Message::SetLogic { rhai }).await
             }
             LogicCmd::Export { targets } => cmd_export_one(targets, ExportKind::Logic, None).await,
+            LogicCmd::Edit(o) => crate::edit::run(crate::edit::Kind::Logic, o).await,
         },
         Cmd::State { sub } => match sub {
             StateCmd::Import { file, targets } => {
@@ -513,7 +534,7 @@ fn cmd_set_active(s: StageList, active: bool) -> Result<()> {
 
 /// Targets for a command. Without `--name`, mirrors are left out: they show
 /// their relay's screen, so rotation commands and exports are for the relay.
-fn resolve_targets(cfg: &CatcConfig, t: &Targets) -> Result<Vec<String>> {
+pub(crate) fn resolve_targets(cfg: &CatcConfig, t: &Targets) -> Result<Vec<String>> {
     resolve_targets_scoped(cfg, t, false)
 }
 
@@ -555,7 +576,7 @@ fn resolve_targets_scoped(
     }
 }
 
-async fn cmd_send(t: Targets, msg: Message) -> Result<()> {
+pub(crate) async fn cmd_send(t: Targets, msg: Message) -> Result<()> {
     cmd_send_many(t, vec![msg]).await
 }
 
@@ -658,25 +679,21 @@ async fn cmd_config_import(file: String, t: Targets) -> Result<()> {
     cmd_send(t, Message::SetConfig { yaml }).await
 }
 
-async fn cmd_export_one(t: Targets, kind: ExportKind, dir: Option<String>) -> Result<()> {
-    let cfg = CatcConfig::load()?;
-    let names = resolve_targets(&cfg, &t)?;
-    if names.len() != 1 {
-        bail!("export needs exactly one target (--name N)");
-    }
-    let name = names[0].clone();
+/// Ask one stage for its config and/or logic. Each slot is `None` when the
+/// stage did not answer within 2s, `Some(None)` when it has nothing loaded.
+pub(crate) type Fetched = (Option<Option<String>>, Option<Option<String>>);
+
+pub(crate) async fn fetch_one(
+    cfg: &CatcConfig,
+    name: &str,
+    requests: &[Message],
+) -> Result<Fetched> {
+    let names = vec![name.to_string()];
     let keys = keys_for(&names)?;
-    let key = keys.get(&name).expect("key just derived");
-
-    let requests: Vec<Message> = match kind {
-        ExportKind::Config => vec![Message::GetConfig],
-        ExportKind::Logic => vec![Message::GetLogic],
-        ExportKind::State => vec![Message::GetConfig, Message::GetLogic],
-    };
-
+    let key = keys.get(name).expect("key just derived");
     let mut br = Broker::connect(&cfg.socks).await?;
-    for req in &requests {
-        br.send(key, &name, req).await?;
+    for req in requests {
+        br.send(key, name, req).await?;
     }
     let plaintexts = br.collect(&keys, Duration::from_secs(2)).await;
     br.close().await;
@@ -690,6 +707,23 @@ async fn cmd_export_one(t: Targets, kind: ExportKind, dir: Option<String>) -> Re
             _ => {}
         }
     }
+    Ok((got_yaml, got_rhai))
+}
+
+async fn cmd_export_one(t: Targets, kind: ExportKind, dir: Option<String>) -> Result<()> {
+    let cfg = CatcConfig::load()?;
+    let names = resolve_targets(&cfg, &t)?;
+    if names.len() != 1 {
+        bail!("export needs exactly one target (--name N)");
+    }
+    let name = names[0].clone();
+
+    let requests: Vec<Message> = match kind {
+        ExportKind::Config => vec![Message::GetConfig],
+        ExportKind::Logic => vec![Message::GetLogic],
+        ExportKind::State => vec![Message::GetConfig, Message::GetLogic],
+    };
+    let (got_yaml, got_rhai) = fetch_one(&cfg, &name, &requests).await?;
 
     match kind {
         ExportKind::Config => {
