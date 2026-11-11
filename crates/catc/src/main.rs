@@ -7,6 +7,7 @@
 
 mod cfg;
 mod cli;
+mod completion;
 mod default_logic;
 mod edit;
 mod net;
@@ -14,10 +15,13 @@ mod release;
 mod status;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // `COMPLETE=<shell> catc …` is a TAB press (or the shell asking for its
+    // hook): answer and exit before anything else touches stdout.
+    clap_complete::CompleteEnv::with_factory(cli::Cli::command).complete();
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("install rustls ring crypto provider");

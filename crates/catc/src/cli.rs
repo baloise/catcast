@@ -6,6 +6,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use catcast_core::Config;
 use catcast_proto::{Message, TraceKind};
 use clap::{Args, Parser, Subcommand};
+use clap_complete::ArgValueCandidates;
 use std::collections::HashMap;
 use std::fs;
 use std::time::Duration;
@@ -104,6 +105,13 @@ pub enum Cmd {
         #[command(subcommand)]
         sub: RelayCmd,
     },
+    /// TAB completion for bash, zsh, fish and PowerShell: commands, flags,
+    /// stage and alias names. Without a subcommand: which shells have it.
+    #[command(visible_alias = "autocomplete")]
+    Completion {
+        #[command(subcommand)]
+        sub: Option<CompletionCmd>,
+    },
     /// Print catc's version and the latest published release.
     Version,
     /// Update this catc binary in place to a release (verifies SHA-256 and
@@ -116,6 +124,20 @@ pub enum Cmd {
         #[arg(long)]
         force: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum CompletionCmd {
+    /// Hook catc into a shell's startup file (default: the shell you're in).
+    Install {
+        shell: Option<crate::completion::Shell>,
+    },
+    /// Remove the hook `install` added (default: the shell you're in).
+    Uninstall {
+        shell: Option<crate::completion::Shell>,
+    },
+    /// Print the hook, for adding it to your dotfiles yourself.
+    Print { shell: crate::completion::Shell },
 }
 
 #[derive(Subcommand)]
@@ -136,6 +158,7 @@ pub enum AutostartCmd {
 #[derive(Args)]
 pub struct StageList {
     /// One or more stage names. Mutually exclusive with `--all`.
+    #[arg(add = ArgValueCandidates::new(crate::completion::stage_names))]
     pub names: Vec<String>,
     /// Apply to every registered stage.
     #[arg(long)]
@@ -147,7 +170,7 @@ pub struct Targets {
     /// Target stage by name (repeatable). If neither this nor `--all` is
     /// given, the command goes to every active stage except mirrors
     /// (`stage update` includes them).
-    #[arg(long = "name")]
+    #[arg(long = "name", add = ArgValueCandidates::new(crate::completion::stage_names))]
     pub names: Vec<String>,
     /// Target every registered stage, regardless of active flag (mirrors
     /// only for `stage update`).
@@ -165,6 +188,7 @@ pub enum OnOff {
 pub enum ConfigCmd {
     /// Push a config YAML file to the target stage(s).
     Import {
+        #[arg(value_hint = clap::ValueHint::FilePath)]
         file: String,
         #[command(flatten)]
         targets: Targets,
@@ -185,6 +209,7 @@ pub enum LogicCmd {
     /// Push a Rhai logic file to the target stage(s).
     /// If <FILE> is omitted, the built-in default logic is used.
     Import {
+        #[arg(value_hint = clap::ValueHint::FilePath)]
         file: Option<String>,
         #[command(flatten)]
         targets: Targets,
@@ -215,6 +240,7 @@ pub struct EditOpts {
 pub enum StateCmd {
     /// Push `config.yaml` and `logic.rhai` from <dir> to the target stage(s).
     Import {
+        #[arg(value_hint = clap::ValueHint::DirPath)]
         file: String,
         #[command(flatten)]
         targets: Targets,
@@ -223,6 +249,7 @@ pub enum StateCmd {
     Export {
         /// Directory to write `config.yaml` and `logic.rhai` into. Created
         /// if it doesn't exist. Symmetric with `state import <dir>`.
+        #[arg(value_hint = clap::ValueHint::DirPath)]
         dir: String,
         #[command(flatten)]
         targets: Targets,
@@ -234,7 +261,10 @@ pub enum StageCmd {
     /// Register a stage by name (read it off the stage's catcast://about page).
     Add { name: String },
     /// Forget a stage.
-    Remove { name: String },
+    Remove {
+        #[arg(add = ArgValueCandidates::new(crate::completion::stage_names))]
+        name: String,
+    },
     /// Mark stages active.
     Activate(StageList),
     /// Mark stages inactive.
@@ -301,10 +331,10 @@ pub enum RelayCmd {
     /// every stage in a room receives every frame.
     Pair {
         /// The stage inside the network whose screen is mirrored.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(crate::completion::stage_names))]
         relay: String,
         /// The `--mirror` stage outside the network.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(crate::completion::stage_names))]
         mirror: String,
         /// Wait after each page load before capturing, e.g. `3s`.
         #[arg(long, default_value = "3s")]
@@ -324,16 +354,16 @@ pub enum RelayCmd {
     /// free; the least recently shown tiles are dropped first. Applies at
     /// once and survives restarts.
     Cache {
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(crate::completion::stage_names))]
         mirror: String,
         /// e.g. `256MB`, `2GB`; a bare number is MB. Minimum 8MB.
         size: String,
     },
     /// Stop <RELAY> from pushing frames (and unpair <MIRROR> if given).
     Off {
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(crate::completion::stage_names))]
         relay: String,
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(crate::completion::stage_names))]
         mirror: Option<String>,
     },
 }
@@ -349,11 +379,20 @@ pub enum AliasCmd {
     /// List stored aliases.
     List,
     /// Run a stored alias by name.
-    Run { name: String },
+    Run {
+        #[arg(add = ArgValueCandidates::new(crate::completion::alias_names))]
+        name: String,
+    },
     /// Bulk-load aliases from a YAML file.
-    Import { file: String },
+    Import {
+        #[arg(value_hint = clap::ValueHint::FilePath)]
+        file: String,
+    },
     /// Bulk-save aliases to a YAML file.
-    Export { file: String },
+    Export {
+        #[arg(value_hint = clap::ValueHint::FilePath)]
+        file: String,
+    },
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
@@ -473,6 +512,12 @@ pub async fn run(cli: Cli) -> Result<()> {
                 let cap_bytes = parse_size(&size)?;
                 send_one_each(vec![(mirror, Message::SetMirrorCache { cap_bytes })]).await
             }
+        },
+        Cmd::Completion { sub } => match sub {
+            None => crate::completion::cmd_status(),
+            Some(CompletionCmd::Install { shell }) => crate::completion::cmd_install(shell),
+            Some(CompletionCmd::Uninstall { shell }) => crate::completion::cmd_uninstall(shell),
+            Some(CompletionCmd::Print { shell }) => crate::completion::cmd_print(shell),
         },
         Cmd::Version => cmd_version().await,
         Cmd::Status => crate::status::cmd_status().await,

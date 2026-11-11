@@ -53,6 +53,7 @@ catc stage add kitchen        # the name shows on the stage's catcast://about pa
 catc config edit --name kitchen # download, $EDITOR, diff, push
 catc nav 'https://example.com/board?team=a&view=tv#geek,flags' --for 5m
 catc status                   # broker, stages, mirrors: up/down, last seen, uptime
+catc completion               # TAB completion: which shells have it, what to run
 ```
 
 See `examples/` for `config.yaml`, `aliases.yaml`, and a default Rhai logic.
@@ -66,6 +67,16 @@ says so if you left unpushed edits or the stage changed in the meantime.
 GUI editors need to block (`EDITOR="code --wait"`), or pass `--watch` to
 keep the editor open and get a push prompt on every save. `config
 import`/`export` remain for scripting.
+
+**TAB completion.** `catc completion` lists bash, zsh, fish and PowerShell
+with whether completion is on and the command to turn it on or off
+(`catc completion install zsh`; no shell name means the one you're in).
+It completes subcommands, flags, file paths, and the stage and alias names
+from the `catc.toml` the command would use. Install adds one marked block
+to your rc file (`$PROFILE` for PowerShell; its own file for fish) that
+calls back into catc on every TAB, so completions keep up with
+`catc self-update`. `uninstall` removes exactly that block, and
+`catc completion print <shell>` shows it if you keep your own dotfiles.
 
 **URLs with `?`, `&`, `#` or spaces.** URLs travel and are stored exactly as
 written, but two layers in front of catcast parse them first:

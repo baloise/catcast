@@ -60,6 +60,9 @@ futures-util = "0.3"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+# Exact pin: the dynamic completer (`CompleteEnv`, `ArgValueCandidates`)
+# sits behind the `unstable-dynamic` feature and may change in a minor.
+clap_complete = { version = "=4.6.11", features = ["unstable-dynamic"] }
 toml = "0.9"
 directories = "6"
 humantime = "2"
